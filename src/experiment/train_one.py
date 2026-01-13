@@ -99,10 +99,16 @@ def train_one(
     bad_evals = 0
 
     global_step = 0
-    eval_iterator = trange(train_cfg.max_evals, disable=not progress, desc="evals", leave=False)
-    for eval_idx in eval_iterator:
+    for eval_idx in range(train_cfg.max_evals):
         model.train()
-        for _ in range(train_cfg.steps_per_eval):
+        epoch_bar = trange(
+            train_cfg.steps_per_eval,
+            disable=not progress,
+            desc=f"epoch {eval_idx + 1}/{train_cfg.max_evals}",
+            leave=False,
+        )
+        last_loss = None
+        for _ in epoch_bar:
             if train_cfg.drop_positions_step is not None:
                 if global_step == train_cfg.drop_positions_step:
                     model.set_positions_enabled(False)
@@ -127,11 +133,15 @@ def train_one(
 
             logits = model(x)
             loss = loss_fn(logits, y)
+            last_loss = float(loss.item())
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             global_step += 1
+
+            if progress and (global_step % max(1, train_cfg.steps_per_eval // 4) == 0):
+                epoch_bar.set_postfix(loss=last_loss, lr=float(lr))
 
         acc = evaluate_accuracy(
             model=model,
@@ -153,7 +163,7 @@ def train_one(
             bad_evals += 1
 
         if progress:
-            eval_iterator.set_postfix(best=float(best_acc), last=float(acc), bad=bad_evals, step=global_step)
+            epoch_bar.set_postfix(loss=last_loss, lr=float(_lr_at_step(max(0, global_step - 1))), acc=float(acc), best=float(best_acc), bad=bad_evals)
 
         if bad_evals > train_cfg.patience:
             break
