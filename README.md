@@ -31,6 +31,7 @@ We also include a “DroPE-like” condition where we **train with positions ena
 Create an environment and install deps:
 
 ```powershell
+git clone https://github.com/lhallee/position_encoding_exp.git
 chmod +x setup_env.sh
 ./setup_env.sh
 source ~/env/bin/activate
