@@ -1,9 +1,0 @@
-seed,seq_len,vocab_size,attention_type,positional_mode,drop_positions_step,label_mode,n_layers,d_model,n_heads,d_ff,steps_per_eval,max_evals,patience,warmup_steps,trained_steps,best_eval_idx,batch_size,lr,weight_decay,eval_batches,eval_acc
-0,128,128,bidirectional,none,-1,true,1,32,2,128,16,3,1,16,48,2,64,0.001,0.01,4,0.01171875
-0,128,128,bidirectional,learned_abs,-1,true,1,32,2,128,16,3,1,16,48,1,64,0.001,0.01,4,0.01953125
-0,128,128,bidirectional,learned_abs,32,true,1,32,2,128,16,3,1,16,48,1,64,0.001,0.01,4,0.01953125
-0,128,128,causal,none,-1,true,1,32,2,128,16,3,1,16,48,2,64,0.001,0.01,4,0.015625
-0,128,128,causal,learned_abs,-1,true,1,32,2,128,16,3,1,16,48,2,64,0.001,0.01,4,0.01953125
-0,128,128,causal,learned_abs,32,true,1,32,2,128,16,3,1,16,48,2,64,0.001,0.01,4,0.01953125
-0,128,128,bidirectional,learned_abs,-1,random,1,32,2,128,16,3,1,16,48,0,64,0.001,0.01,4,0.0078125
-0,128,128,causal,learned_abs,-1,random,1,32,2,128,16,3,1,16,48,0,64,0.001,0.01,4,0.0078125
