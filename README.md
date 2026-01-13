@@ -32,6 +32,7 @@ Create an environment and install deps:
 
 ```powershell
 git clone https://github.com/lhallee/position_encoding_exp.git
+cd position_encoding_exp
 chmod +x setup_env.sh
 ./setup_env.sh
 source ~/env/bin/activate
@@ -40,7 +41,7 @@ source ~/env/bin/activate
 Run a small sweep and generate plots:
 
 ```powershell
-python -m src.experiment.run_sweep --out_dir outputs --device auto
+python -m src.experiment.run_sweep --out_dir outputs --progress
 ```
 
 Results:
