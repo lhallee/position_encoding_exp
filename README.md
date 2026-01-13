@@ -31,15 +31,15 @@ We also include a “DroPE-like” condition where we **train with positions ena
 Create an environment and install deps:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
+chmod +x setup_env.sh
+./setup_env.sh
+source ~/env/bin/activate
 ```
 
 Run a small sweep and generate plots:
 
 ```powershell
-py -m src.experiment.run_sweep --out_dir outputs --device auto
+python -m src.experiment.run_sweep --out_dir outputs --device auto
 ```
 
 Results:
