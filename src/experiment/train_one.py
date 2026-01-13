@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
 import torch
 import torch.nn as nn
 from tqdm import trange
@@ -16,6 +17,7 @@ class TrainConfig:
     steps_per_eval: int
     max_evals: int
     patience: int
+    warmup_steps: int
     batch_size: int
     lr: float
     weight_decay: float
@@ -75,6 +77,23 @@ def train_one(
     opt = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
     loss_fn = nn.CrossEntropyLoss()
 
+    total_steps = train_cfg.max_evals * train_cfg.steps_per_eval
+    if total_steps <= 0:
+        raise ValueError(f"total_steps must be > 0, got {total_steps}")
+    if train_cfg.warmup_steps <= 0:
+        raise ValueError(f"warmup_steps must be > 0, got {train_cfg.warmup_steps}")
+
+    def _lr_at_step(step: int) -> float:
+        # Warmup: 0 -> lr over warmup_steps
+        if step < train_cfg.warmup_steps:
+            return train_cfg.lr * (float(step + 1) / float(train_cfg.warmup_steps))
+
+        # Cosine decay from lr -> 0 over the remaining steps
+        denom = float(max(1, total_steps - train_cfg.warmup_steps))
+        progress = float(step - train_cfg.warmup_steps) / denom
+        progress = min(max(progress, 0.0), 1.0)
+        return train_cfg.lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
     best_acc = -1.0
     best_eval_idx = -1
     bad_evals = 0
@@ -87,6 +106,10 @@ def train_one(
             if train_cfg.drop_positions_step is not None:
                 if global_step == train_cfg.drop_positions_step:
                     model.set_positions_enabled(False)
+
+            lr = _lr_at_step(global_step)
+            for group in opt.param_groups:
+                group["lr"] = lr
 
             x, y = sample_batch_argmax_position(
                 batch_size=train_cfg.batch_size,
@@ -150,6 +173,7 @@ def train_one(
         "steps_per_eval": train_cfg.steps_per_eval,
         "max_evals": train_cfg.max_evals,
         "patience": train_cfg.patience,
+        "warmup_steps": train_cfg.warmup_steps,
         "trained_steps": global_step,
         "best_eval_idx": best_eval_idx,
         "batch_size": train_cfg.batch_size,

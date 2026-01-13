@@ -13,21 +13,23 @@ from src.utils.seed import set_global_seed
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run position-probe sweeps (causal vs bidirectional, pos modes).")
-    p.add_argument("--out_dir", type=str, default="outputs", help="Output directory.")
-    p.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
-    p.add_argument("--steps", type=int, default=1024, help="Minibatches per evaluation (steps-per-eval).")
-    p.add_argument("--max_evals", type=int, default=25, help="Max #eval cycles before stopping.")
-    p.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
-    p.add_argument("--batch_size", type=int, default=256, help="Batch size.")
-    p.add_argument("--eval_batches", type=int, default=32, help="Evaluation batches.")
-    p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
-    p.add_argument("--seq_len", type=int, default=128, help="Sequence length.")
-    p.add_argument("--vocab_size", type=int, default=128, help="Vocab size (token IDs 1..128).")
-    p.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
-    p.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
-    p.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="Run position-probe sweeps (causal vs bidirectional, pos modes).")
+    parser.add_argument("--out_dir", type=str, default="outputs", help="Output directory.")
+    parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
+    parser.add_argument("--steps", type=int, default=128, help="Minibatches per evaluation (steps-per-eval).")
+    parser.add_argument("--max_evals", type=int, default=25, help="Max #eval cycles before stopping.")
+    parser.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
+    parser.add_argument("--batch_size", type=int, default=2048, help="Batch size.")
+    parser.add_argument("--eval_batches", type=int, default=8, help="Evaluation batches.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
+    parser.add_argument("--seq_len", type=int, default=128, help="Sequence length.")
+    parser.add_argument("--vocab_size", type=int, default=128, help="Vocab size (token IDs 1..128).")
+    parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
+    parser.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
+    parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    return parser.parse_args()
 
 
 def _device_from_arg(device_arg: str) -> torch.device:
@@ -65,7 +67,8 @@ def main() -> None:
     conditions: list[tuple[str, int]] = [
         ("none", -1),
         ("learned_abs", -1),
-        ("learned_abs", int(args.steps * 2 / 3)),
+        # Drop after the 2nd evaluation (i.e., after 2 * steps_per_eval minibatches).
+        ("learned_abs", int(2 * args.steps)),
     ]
     attention_types = ["bidirectional", "causal"]
 
@@ -103,9 +106,10 @@ def main() -> None:
                             steps_per_eval=args.steps,
                             max_evals=args.max_evals,
                             patience=args.patience,
+                            warmup_steps=args.steps,
                             batch_size=args.batch_size,
-                            lr=3e-4,
-                            weight_decay=0.01,
+                            lr=args.lr,
+                            weight_decay=args.weight_decay,
                             eval_batches=args.eval_batches,
                             drop_positions_step=None if drop_step < 0 else drop_step,
                             label_mode="true",
@@ -152,9 +156,10 @@ def main() -> None:
                 steps_per_eval=args.steps,
                 max_evals=args.max_evals,
                 patience=args.patience,
+                warmup_steps=args.steps,
                 batch_size=args.batch_size,
-                lr=3e-4,
-                weight_decay=0.01,
+                lr=args.lr,
+                weight_decay=args.weight_decay,
                 eval_batches=args.eval_batches,
                 drop_positions_step=None,
                 label_mode="random",
