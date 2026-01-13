@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
@@ -39,6 +40,20 @@ def _pretty_condition(positional_mode: str, drop_positions_step: int) -> str:
     if positional_mode == "learned_abs" and int(drop_positions_step) >= 0:
         return "Drop positions after eval #2 (DroPE-like)"
     return f"{positional_mode} (drop={int(drop_positions_step)})"
+
+
+def _group_stats(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    """
+    Compute mean/std/n and a normal-approx 95% CI half-width for eval_acc.
+
+    Note: with small #seeds, this is an approximation (z=1.96).
+    """
+    g = df.groupby(group_cols, as_index=False)["eval_acc"].agg(["mean", "std", "count"]).reset_index()
+    g = g.rename(columns={"mean": "acc_mean", "std": "acc_std", "count": "n"})
+    g["acc_std"] = g["acc_std"].fillna(0.0)
+    g["acc_sem"] = g["acc_std"] / np.sqrt(g["n"].clip(lower=1))
+    g["acc_ci95"] = 1.96 * g["acc_sem"]
+    return g
 
 
 def _savefig(fig: plt.Figure, out_dir: Path, stem: str) -> None:
@@ -109,6 +124,9 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 vmax=vmax,
                 cmap="viridis",
                 cbar=False,
+                annot=True,
+                fmt=".2f",
+                annot_kws={"fontsize": 8},
                 linewidths=0.6,
                 linecolor="white",
                 square=True,
@@ -137,11 +155,24 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     if len(cdf_raw) > 0:
         fig, ax = plt.subplots(figsize=(6.4, 3.6), constrained_layout=True)
         cdf_raw["Attention"] = cdf_raw["attention_type"].map(_pretty_attention)
-        sns.barplot(data=cdf_raw, x="Attention", y="eval_acc", ax=ax, errorbar=("sd", 1), capsize=0.15)
+        stats = _group_stats(cdf_raw, ["Attention"]).sort_values("Attention")
+        x = np.arange(len(stats))
+        ax.bar(x, stats["acc_mean"], color=sns.color_palette("colorblind", n_colors=1)[0])
+        ax.errorbar(
+            x,
+            stats["acc_mean"],
+            yerr=stats["acc_ci95"],
+            fmt="none",
+            ecolor="black",
+            elinewidth=1.2,
+            capsize=4,
+            capthick=1.2,
+        )
+        ax.set_xticks(x, stats["Attention"].tolist())
         ax.axhline(chance, color="black", linestyle="--", linewidth=1.2)
         ax.set_xlabel("")
         ax.set_ylabel("Accuracy")
-        ymax = max(chance * 5.0, float(cdf_raw["eval_acc"].max()) * 1.35)
+        ymax = max(chance * 5.0, float((stats["acc_mean"] + stats["acc_ci95"]).max()) * 1.25)
         ax.set_ylim(0.0, min(1.0, ymax))
         sns.despine(ax=ax)
         _savefig(fig, out_dir, "figure2_control_random_labels")
@@ -166,16 +197,36 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 "Learned absolute positions",
             ]
             fig, ax = plt.subplots(figsize=(8.6, 3.8), constrained_layout=True)
-            sns.barplot(
-                data=sdf_raw,
-                x="Attention",
-                y="eval_acc",
-                hue="Condition",
-                ax=ax,
-                errorbar=("sd", 1),
-                capsize=0.12,
-                hue_order=hue_order,
-            )
+            stats = _group_stats(sdf_raw, ["Attention", "Condition"])
+            stats["Attention"] = pd.Categorical(stats["Attention"], categories=attention_order, ordered=True)
+            stats["Condition"] = pd.Categorical(stats["Condition"], categories=hue_order, ordered=True)
+            stats = stats.sort_values(["Attention", "Condition"])
+
+            attn_vals = attention_order
+            cond_vals = hue_order
+            n_attn = len(attn_vals)
+            n_cond = len(cond_vals)
+            width = 0.22
+            base_x = np.arange(n_attn)
+
+            palette = sns.color_palette("colorblind", n_colors=n_cond)
+            for j, cond in enumerate(cond_vals):
+                sub = stats[stats["Condition"] == cond]
+                sub = sub.set_index("Attention").reindex(attn_vals).reset_index()
+                xs = base_x + (j - (n_cond - 1) / 2) * width
+                ax.bar(xs, sub["acc_mean"], width=width, label=cond, color=palette[j])
+                ax.errorbar(
+                    xs,
+                    sub["acc_mean"],
+                    yerr=sub["acc_ci95"],
+                    fmt="none",
+                    ecolor="black",
+                    elinewidth=1.0,
+                    capsize=3,
+                    capthick=1.0,
+                )
+
+            ax.set_xticks(base_x, attn_vals)
             ax.set_xlabel("")
             ax.set_ylabel("Accuracy")
             ax.set_ylim(0.0, 1.0)
@@ -194,18 +245,25 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         ndf["Hidden size"] = ndf["d_model"]
 
         fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10.2, 3.8), sharey=True, constrained_layout=False)
+        layer_vals = sorted(ndf["Number of layers"].unique())
+        layer_colors = sns.color_palette("viridis", n_colors=len(layer_vals))
+
         for ax, attn in zip(axes, attention_order):
             sdf = ndf[ndf["Attention"] == attn]
-            sns.lineplot(
-                data=sdf,
-                x="Hidden size",
-                y="eval_acc",
-                hue="Number of layers",
-                marker="o",
-                ax=ax,
-                errorbar=("sd", 1),
-                palette="viridis",
-            )
+            stats = _group_stats(sdf, ["Number of layers", "Hidden size"]).sort_values(["Number of layers", "Hidden size"])
+            for color, layer in zip(layer_colors, layer_vals):
+                sub = stats[stats["Number of layers"] == layer]
+                ax.plot(sub["Hidden size"], sub["acc_mean"], marker="o", color=color, linewidth=1.8, label=str(layer))
+                ax.errorbar(
+                    sub["Hidden size"],
+                    sub["acc_mean"],
+                    yerr=sub["acc_ci95"],
+                    fmt="none",
+                    ecolor=color,
+                    elinewidth=1.2,
+                    capsize=3,
+                    capthick=1.0,
+                )
             ax.axhline(chance, color="black", linestyle="--", linewidth=1.0)
             ax.set_xlabel("Hidden size")
             ax.set_ylabel("Accuracy" if attn == attention_order[0] else "")

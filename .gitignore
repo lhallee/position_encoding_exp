@@ -1,3 +1,4 @@
 *.pyc
 /outputs_sanity
 *.png
+/outputs_smoke
