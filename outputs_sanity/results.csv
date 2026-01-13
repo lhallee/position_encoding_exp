@@ -1,2 +1,14 @@
-seed,seq_len,vocab_size,attention_type,positional_mode,drop_positions_step,label_mode,n_layers,d_model,n_heads,d_ff,steps_per_eval,max_evals,patience,trained_steps,best_eval_idx,batch_size,lr,weight_decay,eval_batches,eval_acc
-0,128,128,bidirectional,none,-1,true,2,64,2,256,64,6,3,384,4,128,0.0003,0.01,16,0.01220703125
+seed,seq_len,vocab_size,attention_type,positional_mode,drop_positions_step,label_mode,n_layers,d_model,n_heads,d_ff,steps,batch_size,lr,weight_decay,eval_batches,eval_acc
+0,128,128,bidirectional,none,-1,true,1,32,2,128,256,128,0.0003,0.01,16,0.0107421875
+0,128,128,bidirectional,none,-1,true,2,32,2,128,256,128,0.0003,0.01,16,0.01025390625
+0,128,128,bidirectional,none,-1,true,4,32,2,128,256,128,0.0003,0.01,16,0.00927734375
+0,128,128,bidirectional,none,-1,true,6,32,2,128,256,128,0.0003,0.01,16,0.009765625
+0,128,128,bidirectional,none,-1,true,1,64,2,256,256,128,0.0003,0.01,16,0.005859375
+0,128,128,bidirectional,none,-1,true,2,64,2,256,256,128,0.0003,0.01,16,0.009765625
+0,128,128,bidirectional,none,-1,true,4,64,2,256,256,128,0.0003,0.01,16,0.00732421875
+0,128,128,bidirectional,none,-1,true,6,64,2,256,256,128,0.0003,0.01,16,0.00830078125
+0,128,128,bidirectional,none,-1,true,1,128,4,512,256,128,0.0003,0.01,16,0.01318359375
+0,128,128,bidirectional,none,-1,true,2,128,4,512,256,128,0.0003,0.01,16,0.015625
+0,128,128,bidirectional,none,-1,true,4,128,4,512,256,128,0.0003,0.01,16,0.01220703125
+0,128,128,bidirectional,none,-1,true,6,128,4,512,256,128,0.0003,0.01,16,0.00927734375
+0,128,128,bidirectional,none,-1,true,1,256,4,1024,256,128,0.0003,0.01,16,0.01220703125

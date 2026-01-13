@@ -20,7 +20,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max_evals", type=int, default=25, help="Max #eval cycles before stopping.")
     p.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
     p.add_argument("--batch_size", type=int, default=256, help="Batch size.")
-    p.add_argument("--eval_batches", type=int, default=64, help="Evaluation batches.")
+    p.add_argument("--eval_batches", type=int, default=32, help="Evaluation batches.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
     p.add_argument("--seq_len", type=int, default=128, help="Sequence length.")
     p.add_argument("--vocab_size", type=int, default=128, help="Vocab size (token IDs 1..128).")
