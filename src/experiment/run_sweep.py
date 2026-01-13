@@ -57,8 +57,8 @@ def main() -> None:
     # Fixed modeling choices for simplicity:
     # - n_heads scales with d_model (keep head dim ~32 where possible)
     # - d_ff = 4 * d_model
-    d_models = list(args.d_models)
-    n_layers_list = list(args.n_layers)
+    d_models = sorted(list(args.d_models), reverse=True)
+    n_layers_list = sorted(list(args.n_layers), reverse=True)
 
     # Conditions:
     # - positional_mode=none (no PE ever)
