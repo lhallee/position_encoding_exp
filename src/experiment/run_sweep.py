@@ -56,7 +56,7 @@ def main() -> None:
 
     # Fixed modeling choices for simplicity:
     # - n_heads scales with d_model (keep head dim ~32 where possible)
-    # - d_ff = 4 * d_model
+    # - d_ff = 3 * d_model
     d_models = sorted(list(args.d_models), reverse=True)
     n_layers_list = sorted(list(args.n_layers), reverse=True)
 
@@ -86,8 +86,10 @@ def main() -> None:
                         # keep head dim reasonable; ensure divisible
                         if d_model >= 128:
                             n_heads = 4
-                        else:
+                        elif d_model >= 64:
                             n_heads = 2
+                        else:
+                            n_heads = 1
                         if d_model % n_heads != 0:
                             continue
 
@@ -97,7 +99,7 @@ def main() -> None:
                             d_model=d_model,
                             n_layers=n_layers,
                             n_heads=n_heads,
-                            d_ff=4 * d_model,
+                            d_ff=3 * d_model,
                             dropout=0.0,
                             attention_type=attention_type,
                             positional_mode=positional_mode,
