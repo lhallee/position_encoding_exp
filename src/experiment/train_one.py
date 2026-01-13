@@ -13,12 +13,15 @@ from src.utils.seed import set_global_seed
 
 @dataclass(frozen=True)
 class TrainConfig:
-    steps: int
+    steps_per_eval: int
+    max_evals: int
+    patience: int
     batch_size: int
     lr: float
     weight_decay: float
     eval_batches: int
     drop_positions_step: int | None  # if set, disable positions at this step and keep training
+    label_mode: str  # "true" | "random"
 
 
 @torch.no_grad()
@@ -31,6 +34,7 @@ def evaluate_accuracy(
     eval_batches: int,
     vocab_low_inclusive: int,
     vocab_high_inclusive: int,
+    label_mode: str,
 ) -> float:
     model.eval()
     correct = 0
@@ -43,6 +47,12 @@ def evaluate_accuracy(
             vocab_high_inclusive=vocab_high_inclusive,
             device=device,
         )
+        if label_mode == "random":
+            y = torch.randint(low=0, high=seq_len, size=y.shape, device=device, dtype=torch.long)
+        elif label_mode == "true":
+            pass
+        else:
+            raise ValueError(f"label_mode must be true|random, got {label_mode}")
         logits = model(x)
         pred = torch.argmax(logits, dim=1)
         correct += int(torch.sum(pred == y).item())
@@ -65,43 +75,65 @@ def train_one(
     opt = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
     loss_fn = nn.CrossEntropyLoss()
 
-    model.train()
-    iterator = trange(train_cfg.steps, disable=not progress, desc="train", leave=False)
-    for step in iterator:
-        if train_cfg.drop_positions_step is not None:
-            if step == train_cfg.drop_positions_step:
-                model.set_positions_enabled(False)
+    best_acc = -1.0
+    best_eval_idx = -1
+    bad_evals = 0
 
-        x, y = sample_batch_argmax_position(
-            batch_size=train_cfg.batch_size,
+    global_step = 0
+    eval_iterator = trange(train_cfg.max_evals, disable=not progress, desc="evals", leave=False)
+    for eval_idx in eval_iterator:
+        model.train()
+        for _ in range(train_cfg.steps_per_eval):
+            if train_cfg.drop_positions_step is not None:
+                if global_step == train_cfg.drop_positions_step:
+                    model.set_positions_enabled(False)
+
+            x, y = sample_batch_argmax_position(
+                batch_size=train_cfg.batch_size,
+                seq_len=model_cfg.seq_len,
+                vocab_low_inclusive=vocab_low_inclusive,
+                vocab_high_inclusive=vocab_high_inclusive,
+                device=device,
+            )
+            if train_cfg.label_mode == "random":
+                y = torch.randint(low=0, high=model_cfg.seq_len, size=y.shape, device=device, dtype=torch.long)
+            elif train_cfg.label_mode == "true":
+                pass
+            else:
+                raise ValueError(f"label_mode must be true|random, got {train_cfg.label_mode}")
+
+            logits = model(x)
+            loss = loss_fn(logits, y)
+
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            global_step += 1
+
+        acc = evaluate_accuracy(
+            model=model,
+            device=device,
             seq_len=model_cfg.seq_len,
+            batch_size=train_cfg.batch_size,
+            eval_batches=train_cfg.eval_batches,
             vocab_low_inclusive=vocab_low_inclusive,
             vocab_high_inclusive=vocab_high_inclusive,
-            device=device,
+            label_mode=train_cfg.label_mode,
         )
 
-        logits = model(x)
-        loss = loss_fn(logits, y)
+        improved = acc > best_acc
+        if improved:
+            best_acc = acc
+            best_eval_idx = eval_idx
+            bad_evals = 0
+        else:
+            bad_evals += 1
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        if progress:
+            eval_iterator.set_postfix(best=float(best_acc), last=float(acc), bad=bad_evals, step=global_step)
 
-        if progress and (step + 1) % max(1, train_cfg.steps // 5) == 0:
-            with torch.no_grad():
-                pred = torch.argmax(logits, dim=1)
-                acc = torch.mean((pred == y).float()).item()
-            iterator.set_postfix(loss=float(loss.item()), acc=float(acc))
-
-    acc = evaluate_accuracy(
-        model=model,
-        device=device,
-        seq_len=model_cfg.seq_len,
-        batch_size=train_cfg.batch_size,
-        eval_batches=train_cfg.eval_batches,
-        vocab_low_inclusive=vocab_low_inclusive,
-        vocab_high_inclusive=vocab_high_inclusive,
-    )
+        if bad_evals > train_cfg.patience:
+            break
 
     return {
         "seed": seed,
@@ -110,15 +142,20 @@ def train_one(
         "attention_type": model_cfg.attention_type,
         "positional_mode": model_cfg.positional_mode,
         "drop_positions_step": -1 if train_cfg.drop_positions_step is None else train_cfg.drop_positions_step,
+        "label_mode": train_cfg.label_mode,
         "n_layers": model_cfg.n_layers,
         "d_model": model_cfg.d_model,
         "n_heads": model_cfg.n_heads,
         "d_ff": model_cfg.d_ff,
-        "steps": train_cfg.steps,
+        "steps_per_eval": train_cfg.steps_per_eval,
+        "max_evals": train_cfg.max_evals,
+        "patience": train_cfg.patience,
+        "trained_steps": global_step,
+        "best_eval_idx": best_eval_idx,
         "batch_size": train_cfg.batch_size,
         "lr": train_cfg.lr,
         "weight_decay": train_cfg.weight_decay,
         "eval_batches": train_cfg.eval_batches,
-        "eval_acc": float(acc),
+        "eval_acc": float(best_acc),
     }
 

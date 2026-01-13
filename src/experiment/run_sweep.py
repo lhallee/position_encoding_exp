@@ -16,12 +16,16 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run position-probe sweeps (causal vs bidirectional, pos modes).")
     p.add_argument("--out_dir", type=str, default="outputs", help="Output directory.")
     p.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
-    p.add_argument("--steps", type=int, default=2048, help="Training steps per run.")
+    p.add_argument("--steps", type=int, default=1024, help="Minibatches per evaluation (steps-per-eval).")
+    p.add_argument("--max_evals", type=int, default=25, help="Max #eval cycles before stopping.")
+    p.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
     p.add_argument("--batch_size", type=int, default=256, help="Batch size.")
     p.add_argument("--eval_batches", type=int, default=64, help="Evaluation batches.")
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
     p.add_argument("--seq_len", type=int, default=128, help="Sequence length.")
     p.add_argument("--vocab_size", type=int, default=128, help="Vocab size (token IDs 1..128).")
+    p.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
+    p.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
     p.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
     return p.parse_args()
 
@@ -51,8 +55,8 @@ def main() -> None:
     # Fixed modeling choices for simplicity:
     # - n_heads scales with d_model (keep head dim ~32 where possible)
     # - d_ff = 4 * d_model
-    d_models = [32, 64, 128, 256]
-    n_layers_list = [1, 2, 4, 6]
+    d_models = list(args.d_models)
+    n_layers_list = list(args.n_layers)
 
     # Conditions:
     # - positional_mode=none (no PE ever)
@@ -96,12 +100,15 @@ def main() -> None:
                             positional_mode=positional_mode,
                         )
                         train_cfg = TrainConfig(
-                            steps=args.steps,
+                            steps_per_eval=args.steps,
+                            max_evals=args.max_evals,
+                            patience=args.patience,
                             batch_size=args.batch_size,
                             lr=3e-4,
                             weight_decay=0.01,
                             eval_batches=args.eval_batches,
                             drop_positions_step=None if drop_step < 0 else drop_step,
+                            label_mode="true",
                         )
 
                         print(
@@ -117,10 +124,58 @@ def main() -> None:
                             vocab_high_inclusive=128,
                             progress=args.progress,
                         )
+                        print(f"  eval_acc={row['eval_acc']:.4f}")
                         rows.append(row)
 
                         df = pd.DataFrame(rows)
                         df.to_csv(out_dir / "results.csv", index=False)
+
+    # Controls: random labels (i.e., "shuffled dataset labels") on the largest model config.
+    # We run len(seeds) controls for each attention type, last.
+    control_d_model = max(d_models)
+    control_n_layers = max(n_layers_list)
+    control_n_heads = 4 if control_d_model >= 128 else 2
+    for seed in args.seeds:
+        for attention_type in attention_types:
+            model_cfg = TransformerConfig(
+                vocab_size=args.vocab_size,
+                seq_len=args.seq_len,
+                d_model=control_d_model,
+                n_layers=control_n_layers,
+                n_heads=control_n_heads,
+                d_ff=4 * control_d_model,
+                dropout=0.0,
+                attention_type=attention_type,
+                positional_mode="learned_abs",
+            )
+            train_cfg = TrainConfig(
+                steps_per_eval=args.steps,
+                max_evals=args.max_evals,
+                patience=args.patience,
+                batch_size=args.batch_size,
+                lr=3e-4,
+                weight_decay=0.01,
+                eval_batches=args.eval_batches,
+                drop_positions_step=None,
+                label_mode="random",
+            )
+            print(
+                f"[control] seed={seed} attn={attention_type} pos=learned_abs drop=-1 "
+                f"layers={control_n_layers} d={control_d_model} device={device} label_mode=random"
+            )
+            row = train_one(
+                model_cfg=model_cfg,
+                train_cfg=train_cfg,
+                seed=seed,
+                device=device,
+                vocab_low_inclusive=1,
+                vocab_high_inclusive=128,
+                progress=args.progress,
+            )
+            print(f"  eval_acc={row['eval_acc']:.4f}")
+            rows.append(row)
+            df = pd.DataFrame(rows)
+            df.to_csv(out_dir / "results.csv", index=False)
 
     plot_all(results_csv=out_dir / "results.csv", out_dir=plots_dir)
     print(f"Done. Wrote {out_dir / 'results.csv'} and plots to {plots_dir}")

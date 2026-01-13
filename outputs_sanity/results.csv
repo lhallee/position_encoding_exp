@@ -1,0 +1,2 @@
+seed,seq_len,vocab_size,attention_type,positional_mode,drop_positions_step,label_mode,n_layers,d_model,n_heads,d_ff,steps_per_eval,max_evals,patience,trained_steps,best_eval_idx,batch_size,lr,weight_decay,eval_batches,eval_acc
+0,128,128,bidirectional,none,-1,true,2,64,2,256,64,6,3,384,4,128,0.0003,0.01,16,0.01220703125
