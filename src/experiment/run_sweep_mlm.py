@@ -21,6 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, default="nl", choices=["nl", "protein"], help="Which dataset to run.")
     parser.add_argument("--out_dir", type=str, default="outputs_exp2", help="Output directory.")
     parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile on Linux.")
     parser.add_argument("--steps", type=int, default=1000, help="Minibatches per evaluation.")
     parser.add_argument("--max_evals_nl", type=int, default=10, help="Eval cycles on natural language phase.")
     parser.add_argument("--max_evals_prot", type=int, default=10, help="Eval cycles on protein phase.")
@@ -177,7 +178,7 @@ def main() -> None:
                     attention_type=attention_type,
                     positional_mode=positional_mode,
                 )
-                model = init_mlm_model(model_cfg=model_cfg, seed=seed, device=device)
+                model = init_mlm_model(model_cfg=model_cfg, seed=seed, device=device, compile_model=bool(args.compile))
 
                 if args.dataset == "nl":
                     train_loader = _build_loader(

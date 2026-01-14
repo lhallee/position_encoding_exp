@@ -64,7 +64,12 @@ class StreamingTokenExamples(IterableDataset):
     def _iter_once(self) -> Iterator[torch.Tensor]:
         for sample in self.dataset:
             text = _select_text(sample, self.cfg.text_key)
-            ids: list[int] = self.tokenizer.encode(text, add_special_tokens=False)
+            ids: list[int] = self.tokenizer.encode(
+                text,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=self.cfg.seq_len,
+            )
             if self._eos_id is not None and len(ids) < self.cfg.seq_len:
                 ids.append(int(self._eos_id))
             if len(ids) > self.cfg.seq_len:

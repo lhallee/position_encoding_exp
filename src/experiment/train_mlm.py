@@ -129,10 +129,11 @@ def init_mlm_model(
     model_cfg: TransformerConfig,
     seed: int,
     device: torch.device,
+    compile_model: bool,
 ) -> TransformerLM:
     set_global_seed(seed)
     model = TransformerLM(model_cfg).to(device)
-    if sys.platform.startswith("linux"):
+    if compile_model and sys.platform.startswith("linux"):
         model = torch.compile(model)
     return model
 

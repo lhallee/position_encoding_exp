@@ -23,7 +23,7 @@ git clone https://github.com/lhallee/position_encoding_exp.git
 cd position_encoding_exp
 chmod +x setup_env.sh
 ./setup_env.sh
-source ~/benv/bin/activate
+source ~/env/bin/activate
 ```
 
 Run Experiment 1 (positional probe sweep):
