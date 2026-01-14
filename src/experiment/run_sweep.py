@@ -22,7 +22,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience on eval accuracy.")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
     parser.add_argument("--eval_batches", type=int, default=32, help="Evaluation batches.")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33], help="Random seeds.")
     parser.add_argument("--seq_len", type=int, default=64, help="Sequence length.")
     parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..vocab_size).")
     parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
