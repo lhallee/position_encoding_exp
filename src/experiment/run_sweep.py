@@ -11,17 +11,35 @@ from src.experiment.train_one import TrainConfig, train_one
 from src.models.transformer import TransformerConfig
 from src.utils.seed import set_global_seed
 
+"""
+Total experiments
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions none --out_dir group_1
+python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions none --out_dir group_2
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions none --out_dir group_3
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs --out_dir group_4
+python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs --out_dir group_5
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs --out_dir group_6
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_7
+python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_8
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs_drop --out_dir group_9
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary --out_dir group_10
+python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary --out_dir group_11
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary --out_dir group_12
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_13
+python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_14
+python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary_drop --out_dir group_15
+"""
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run position-probe sweeps (causal vs bidirectional, pos modes).")
     parser.add_argument("--out_dir", type=str, default="outputs", help="Output directory.")
     parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
-    parser.add_argument("--steps", type=int, default=512, help="Minibatches per evaluation (steps-per-eval).")
-    parser.add_argument("--max_evals", type=int, default=25, help="Max #eval cycles before stopping.")
-    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience on eval accuracy.")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
-    parser.add_argument("--eval_batches", type=int, default=32, help="Evaluation batches.")
+    parser.add_argument("--steps", type=int, default=256, help="Minibatches per evaluation (steps-per-eval).")
+    parser.add_argument("--max_evals", type=int, default=10, help="Max #eval cycles before stopping.")
+    parser.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
+    parser.add_argument("--batch_size", type=int, default=1024, help="Batch size.")
+    parser.add_argument("--eval_batches", type=int, default=16, help="Evaluation batches.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33], help="Random seeds.")
     parser.add_argument("--seq_len", type=int, default=64, help="Sequence length.")
     parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..vocab_size).")
