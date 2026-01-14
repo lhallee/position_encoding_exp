@@ -11,24 +11,6 @@ from src.experiment.train_one import TrainConfig, train_one
 from src.models.transformer import TransformerConfig
 from src.utils.seed import set_global_seed
 
-"""
-Total experiments
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions none --out_dir group_1
-python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions none --out_dir group_2
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions none --out_dir group_3
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs --out_dir group_4
-python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs --out_dir group_5
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs --out_dir group_6
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_7
-python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_8
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs_drop --out_dir group_9
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary --out_dir group_10
-python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary --out_dir group_11
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary --out_dir group_12
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_13
-python -m src.experiment.run_sweep --progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_14
-python -m src.experiment.run_sweep --progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary_drop --out_dir group_15
-"""
 
 
 def _parse_args() -> argparse.Namespace:

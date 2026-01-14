@@ -198,6 +198,11 @@ def train_one(
         if bad_evals > train_cfg.patience:
             break
 
+    # Clear model from memory
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
+
     return {
         "seed": seed,
         "seq_len": model_cfg.seq_len,
