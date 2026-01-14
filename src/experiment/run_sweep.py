@@ -24,7 +24,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_batches", type=int, default=32, help="Evaluation batches.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="Random seeds.")
     parser.add_argument("--seq_len", type=int, default=64, help="Sequence length.")
-    parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..128).")
+    parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..vocab_size).")
     parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
     parser.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
     parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
@@ -134,7 +134,7 @@ def main() -> None:
                             seed=seed,
                             device=device,
                             vocab_low_inclusive=1,
-                            vocab_high_inclusive=128,
+                            vocab_high_inclusive=args.vocab_size,
                             progress=args.progress,
                         )
                         print(f"  eval_acc={row['eval_acc']:.4f}")
@@ -185,7 +185,7 @@ def main() -> None:
                 seed=seed,
                 device=device,
                 vocab_low_inclusive=1,
-                vocab_high_inclusive=128,
+                vocab_high_inclusive=args.vocab_size,
                 progress=args.progress,
             )
             print(f"  eval_acc={row['eval_acc']:.4f}")

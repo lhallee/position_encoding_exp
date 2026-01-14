@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch._dynamo
 
 from functools import partial
 from dataclasses import dataclass
@@ -326,12 +327,20 @@ class PositionProbeTransformer(nn.Module):
             raise ValueError(f"Expected seq_len={self.cfg.seq_len}, got {x.shape[1]}")
 
         # Inputs are expected to be token IDs in [1, vocab_size] inclusive.
-        x_min = int(torch.min(x).item())
-        x_max = int(torch.max(x).item())
-        if x_min < 1 or x_max > self.cfg.vocab_size:
-            raise ValueError(
-                f"Token IDs must be in [1, {self.cfg.vocab_size}], got min={x_min} max={x_max}"
+        if torch._dynamo.is_compiling():
+            # Avoid graph breaks from Tensor.item() while still enforcing the invariant.
+            torch._assert(torch.all(x >= 1), "Token IDs must be >= 1")
+            torch._assert(
+                torch.all(x <= self.cfg.vocab_size),
+                f"Token IDs must be <= {self.cfg.vocab_size}",
             )
+        else:
+            x_min = int(torch.min(x).item())
+            x_max = int(torch.max(x).item())
+            if x_min < 1 or x_max > self.cfg.vocab_size:
+                raise ValueError(
+                    f"Token IDs must be in [1, {self.cfg.vocab_size}], got min={x_min} max={x_max}"
+                )
 
         # Map 1..vocab_size -> 0..vocab_size-1 for embedding lookup.
         h = self.tok_emb(x - 1)  # (b, l, d)
