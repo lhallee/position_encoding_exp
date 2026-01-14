@@ -33,6 +33,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability (default: 0.0).")
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
     parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
+    parser.add_argument(
+        "--conditions",
+        type=str,
+        nargs="+",
+        default=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
+        choices=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
+        help=(
+            "Which positional/Drop conditions to run. "
+            "Options: none, learned_abs, learned_abs_drop, rotary, rotary_drop."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -68,14 +79,15 @@ def main() -> None:
     # - positional_mode=learned_abs + drop_positions_step (DroPE-like)
     # - positional_mode=rotary (RoPE applied inside attention)
     # - positional_mode=rotary + drop_positions_step (drop RoPE after eval #2)
-    conditions: list[tuple[str, int]] = [
-        ("none", -1),
-        ("learned_abs", -1),
-        # Drop after the 2nd evaluation (i.e., after 2 * steps_per_eval minibatches).
-        ("learned_abs", int(2 * args.steps)),
-        ("rotary", -1),
-        ("rotary", int(2 * args.steps)),
-    ]
+    drop_after = int(2 * args.steps)  # drop after the 2nd evaluation
+    condition_map: dict[str, tuple[str, int]] = {
+        "none": ("none", -1),
+        "learned_abs": ("learned_abs", -1),
+        "learned_abs_drop": ("learned_abs", drop_after),
+        "rotary": ("rotary", -1),
+        "rotary_drop": ("rotary", drop_after),
+    }
+    conditions: list[tuple[str, int]] = [condition_map[name] for name in args.conditions]
     attention_types = ["bidirectional", "causal", "dual_triangle"]
 
     rows: list[dict[str, float | int | str]] = []
