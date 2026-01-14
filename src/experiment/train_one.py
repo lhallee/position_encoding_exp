@@ -181,6 +181,13 @@ def train_one(
         else:
             bad_evals += 1
 
+        # If we ever hit perfect accuracy, stop immediately and report that score.
+        # (Accuracy is computed from integer counts, so >= 1.0 is safe.)
+        if acc >= 1.0:
+            best_acc = 1.0
+            best_eval_idx = eval_idx
+            break
+
         if progress:
             epoch_bar.set_postfix(loss=last_loss, lr=float(_lr_at_step(max(0, global_step - 1))), acc=float(acc), best=float(best_acc), bad=bad_evals)
 
