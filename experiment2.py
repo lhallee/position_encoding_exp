@@ -10,12 +10,14 @@ from src.experiment.plot_results_mlm import plot_all
 
 def run_experiment() -> None:
     py_cmd = "py" if sys.platform.startswith("win") else "python"
-    cmd = (
-        f"{py_cmd} -m src.experiment.run_sweep_mlm --progress "
-        "--out_dir outputs_exp2"
-    )
-    print(f"Command: {cmd}")
-    subprocess.run(cmd, shell=True, check=True)
+    for dataset, out_dir in [("nl", "outputs_exp2_nl"), ("protein", "outputs_exp2_protein")]:
+        cmd = (
+            f"{py_cmd} -m src.experiment.run_sweep_mlm --progress "
+            f"--dataset {dataset} "
+            f"--out_dir {out_dir}"
+        )
+        print(f"Command: {cmd}")
+        subprocess.run(cmd, shell=True, check=True)
 
 
 def compile_and_plot(out_dir_path: Path) -> None:
@@ -41,27 +43,33 @@ def main() -> None:
 
         run_experiment2_checks()
         py_cmd = "py" if sys.platform.startswith("win") else "python"
-        cmd = (
-            f"{py_cmd} -m src.experiment.run_sweep_mlm --progress "
-            "--out_dir outputs_bugfix_exp2 "
-            "--device cpu "
-            "--steps 2 --max_evals_nl 1 --max_evals_prot 1 --patience 0 "
-            "--batch_size 2 --eval_batches 1 "
-            "--train_seq_len 16 --test_seq_len 32 "
-            "--d_model 32 --n_layers 1 "
-            "--seeds 11 "
-            "--conditions none "
-            "--fineweb_valid_docs 4 --fineweb_test_docs 4 --shuffle_buffer 100 "
-        )
-        print(f"Bugfix command: {cmd}")
-        subprocess.run(cmd, shell=True, check=True)
+        for dataset, out_dir in [("nl", "outputs_bugfix_exp2_nl"), ("protein", "outputs_bugfix_exp2_protein")]:
+            cmd = (
+                f"{py_cmd} -m src.experiment.run_sweep_mlm --progress "
+                f"--dataset {dataset} "
+                f"--out_dir {out_dir} "
+                "--device cpu "
+                "--steps 2 --max_evals_nl 1 --max_evals_prot 1 --patience 0 "
+                "--batch_size 2 --eval_batches 1 "
+                "--train_seq_len 16 --test_seq_len 32 "
+                "--d_model 32 --n_layers 1 "
+                "--seeds 11 "
+                "--conditions none "
+                "--fineweb_valid_docs 4 --fineweb_test_docs 4 --shuffle_buffer 100 "
+            )
+            print(f"Bugfix command: {cmd}")
+            subprocess.run(cmd, shell=True, check=True)
     elif not args.skip_runs:
         run_experiment()
     else:
         print("Skipping experiment execution as requested.")
 
-    out_dir = Path("outputs_bugfix_exp2") if args.bugfix else Path(args.out_dir)
-    compile_and_plot(out_dir)
+    if args.bugfix:
+        compile_and_plot(Path("outputs_bugfix_exp2_nl"))
+        compile_and_plot(Path("outputs_bugfix_exp2_protein"))
+    else:
+        compile_and_plot(Path("outputs_exp2_nl"))
+        compile_and_plot(Path("outputs_exp2_protein"))
     print("\n--- All tasks completed ---")
 
 

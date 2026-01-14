@@ -19,9 +19,11 @@ We conduct a masked language modeling (MLM) objective for all combinations of po
 Create a virtual environment and install dependencies:
 
 ```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
+git clone https://github.com/lhallee/position_encoding_exp.git
+cd position_encoding_exp
+chmod +x setup_env.sh
+./setup_env.sh
+source ~/benv/bin/activate
 ```
 
 Run Experiment 1 (positional probe sweep):
@@ -36,7 +38,7 @@ Run Experiment 2 (MLM on natural language + proteins):
 py experiment2.py
 ```
 
-Experiment 2 streams data from Hugging Face. The natural language dataset (FineWeb-Edu) is a very large stream, so the script creates small validation/test subsets by shuffling a streaming iterator and then taking a fixed number of documents. The protein dataset (Synthyra/omg_prot50) already includes train/validation/test splits.
+Experiment 2 runs **two independent sweeps** (NLP and protein), each with its own outputs/plots. It streams data from Hugging Face. The natural language dataset (FineWeb-Edu) is a very large stream, so the script creates small validation/test subsets by shuffling a streaming iterator and then taking a fixed number of documents. The protein dataset (Synthyra/omg_prot50) already includes train/valid/test splits.
 
 ## Outputs
 

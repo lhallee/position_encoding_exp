@@ -131,87 +131,44 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
         results_df["Variant"] = results_df["Attention"] + " / " + results_df["Condition"]
 
         rows = []
-        for _, row in results_df.iterrows():
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "NL",
-                    "metric": "loss",
-                    "value": row["nl_test_loss"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "NL",
-                    "metric": "acc",
-                    "value": row["nl_test_acc"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "NL",
-                    "metric": "f1",
-                    "value": row["nl_test_f1"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "NL",
-                    "metric": "mcc",
-                    "value": row["nl_test_mcc"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "Protein",
-                    "metric": "loss",
-                    "value": row["prot_test_loss"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "Protein",
-                    "metric": "acc",
-                    "value": row["prot_test_acc"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "Protein",
-                    "metric": "f1",
-                    "value": row["prot_test_f1"],
-                }
-            )
-            rows.append(
-                {
-                    "Variant": row["Variant"],
-                    "dataset": "Protein",
-                    "metric": "mcc",
-                    "value": row["prot_test_mcc"],
-                }
-            )
+        def _maybe_add(row: pd.Series, *, dataset: str, prefix: str) -> None:
+            metric_map = {
+                "loss": f"{prefix}_test_loss",
+                "acc": f"{prefix}_test_acc",
+                "f1": f"{prefix}_test_f1",
+                "mcc": f"{prefix}_test_mcc",
+            }
+            for metric, col in metric_map.items():
+                if col in results_df.columns:
+                    rows.append(
+                        {
+                            "Variant": row["Variant"],
+                            "dataset": dataset,
+                            "metric": metric,
+                            "value": row[col],
+                        }
+                    )
 
-        test_df = pd.DataFrame(rows)
-        g = sns.catplot(
-            data=test_df,
-            x="Variant",
-            y="value",
-            col="dataset",
-            row="metric",
-            kind="bar",
-            height=2.4,
-            aspect=1.6,
-            errorbar="sd",
-        )
-        g.set_axis_labels("", "Value")
-        for ax in g.axes.flatten():
-            ax.tick_params(axis="x", rotation=45)
-            sns.despine(ax=ax)
-        _savefig(g.figure, out_dir, "figure3_extended_context_test")
-        plt.close(g.figure)
+        for _, row in results_df.iterrows():
+            _maybe_add(row, dataset="NL", prefix="nl")
+            _maybe_add(row, dataset="Protein", prefix="prot")
+
+        if len(rows) > 0:
+            test_df = pd.DataFrame(rows)
+            g = sns.catplot(
+                data=test_df,
+                x="Variant",
+                y="value",
+                col="dataset",
+                row="metric",
+                kind="bar",
+                height=2.4,
+                aspect=1.6,
+                errorbar="sd",
+            )
+            g.set_axis_labels("", "Value")
+            for ax in g.axes.flatten():
+                ax.tick_params(axis="x", rotation=45)
+                sns.despine(ax=ax)
+            _savefig(g.figure, out_dir, "figure3_extended_context_test")
+            plt.close(g.figure)

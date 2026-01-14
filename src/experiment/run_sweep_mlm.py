@@ -18,13 +18,14 @@ from src.utils.seed import set_global_seed
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MLM sweeps for Experiment 2 (NL + proteins).")
+    parser.add_argument("--dataset", type=str, default="nl", choices=["nl", "protein"], help="Which dataset to run.")
     parser.add_argument("--out_dir", type=str, default="outputs_exp2", help="Output directory.")
     parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
-    parser.add_argument("--steps", type=int, default=200, help="Minibatches per evaluation.")
-    parser.add_argument("--max_evals_nl", type=int, default=6, help="Eval cycles on natural language phase.")
-    parser.add_argument("--max_evals_prot", type=int, default=6, help="Eval cycles on protein phase.")
-    parser.add_argument("--patience", type=int, default=2, help="Early stopping patience on eval accuracy.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
+    parser.add_argument("--steps", type=int, default=1000, help="Minibatches per evaluation.")
+    parser.add_argument("--max_evals_nl", type=int, default=10, help="Eval cycles on natural language phase.")
+    parser.add_argument("--max_evals_prot", type=int, default=10, help="Eval cycles on protein phase.")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience on eval accuracy.")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
     parser.add_argument("--eval_batches", type=int, default=8, help="Evaluation batches.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33], help="Random seeds.")
     parser.add_argument("--train_seq_len", type=int, default=128, help="Training sequence length.")
@@ -32,7 +33,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--d_model", type=int, default=768, help="Hidden size.")
     parser.add_argument("--n_layers", type=int, default=12, help="Number of layers.")
     parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout probability.")
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
@@ -136,16 +137,26 @@ def main() -> None:
     run_idx = 0
 
     for seed in args.seeds:
-        nl_train_stream, nl_valid_stream, nl_test_stream = _fineweb_streams(
-            seed=seed,
-            shuffle_buffer=args.shuffle_buffer,
-            valid_docs=args.fineweb_valid_docs,
-            test_docs=args.fineweb_test_docs,
-        )
-        prot_train_stream, prot_valid_stream, prot_test_stream = _protein_streams(
-            seed=seed,
-            shuffle_buffer=args.shuffle_buffer,
-        )
+        if args.dataset == "nl":
+            nl_train_stream, nl_valid_stream, nl_test_stream = _fineweb_streams(
+                seed=seed,
+                shuffle_buffer=args.shuffle_buffer,
+                valid_docs=args.fineweb_valid_docs,
+                test_docs=args.fineweb_test_docs,
+            )
+            prot_train_stream = None
+            prot_valid_stream = None
+            prot_test_stream = None
+            tokenizer = nl_tokenizer
+        else:
+            nl_train_stream = None
+            nl_valid_stream = None
+            nl_test_stream = None
+            prot_train_stream, prot_valid_stream, prot_test_stream = _protein_streams(
+                seed=seed,
+                shuffle_buffer=args.shuffle_buffer,
+            )
+            tokenizer = prot_tokenizer
 
         for attention_type in attention_types:
             for positional_mode, drop_step in conditions:
@@ -156,7 +167,7 @@ def main() -> None:
                     head_size = args.d_model
 
                 model_cfg = TransformerConfig(
-                    vocab_size=int(len(nl_tokenizer)),
+                    vocab_size=int(len(tokenizer)),
                     seq_len=int(args.test_seq_len),
                     d_model=int(args.d_model),
                     n_layers=int(args.n_layers),
@@ -168,84 +179,74 @@ def main() -> None:
                 )
                 model = init_mlm_model(model_cfg=model_cfg, seed=seed, device=device)
 
-                nl_train_loader = _build_loader(
-                    dataset=nl_train_stream,
-                    tokenizer=nl_tokenizer,
-                    seq_len=int(args.train_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.fineweb_text_key,
-                    repeat=True,
-                    mlm_probability=float(args.mlm_prob),
-                )
-                nl_valid_loader = _build_loader(
-                    dataset=nl_valid_stream,
-                    tokenizer=nl_tokenizer,
-                    seq_len=int(args.train_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.fineweb_text_key,
-                    repeat=False,
-                    mlm_probability=float(args.mlm_prob),
-                )
-                nl_test_loader = _build_loader(
-                    dataset=nl_test_stream,
-                    tokenizer=nl_tokenizer,
-                    seq_len=int(args.test_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.fineweb_text_key,
-                    repeat=False,
-                    mlm_probability=float(args.mlm_prob),
-                )
-
-                prot_train_loader = _build_loader(
-                    dataset=prot_train_stream,
-                    tokenizer=prot_tokenizer,
-                    seq_len=int(args.train_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.prot_text_key,
-                    repeat=True,
-                    mlm_probability=float(args.mlm_prob),
-                )
-                prot_valid_loader = _build_loader(
-                    dataset=prot_valid_stream,
-                    tokenizer=prot_tokenizer,
-                    seq_len=int(args.train_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.prot_text_key,
-                    repeat=False,
-                    mlm_probability=float(args.mlm_prob),
-                )
-                prot_test_loader = _build_loader(
-                    dataset=prot_test_stream,
-                    tokenizer=prot_tokenizer,
-                    seq_len=int(args.test_seq_len),
-                    batch_size=int(args.batch_size),
-                    text_key=args.prot_text_key,
-                    repeat=False,
-                    mlm_probability=float(args.mlm_prob),
-                )
+                if args.dataset == "nl":
+                    train_loader = _build_loader(
+                        dataset=nl_train_stream,
+                        tokenizer=nl_tokenizer,
+                        seq_len=int(args.train_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.fineweb_text_key,
+                        repeat=True,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    valid_loader = _build_loader(
+                        dataset=nl_valid_stream,
+                        tokenizer=nl_tokenizer,
+                        seq_len=int(args.train_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.fineweb_text_key,
+                        repeat=False,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    test_loader = _build_loader(
+                        dataset=nl_test_stream,
+                        tokenizer=nl_tokenizer,
+                        seq_len=int(args.test_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.fineweb_text_key,
+                        repeat=False,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    phase_name = "nl"
+                else:
+                    train_loader = _build_loader(
+                        dataset=prot_train_stream,
+                        tokenizer=prot_tokenizer,
+                        seq_len=int(args.train_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.prot_text_key,
+                        repeat=True,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    valid_loader = _build_loader(
+                        dataset=prot_valid_stream,
+                        tokenizer=prot_tokenizer,
+                        seq_len=int(args.train_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.prot_text_key,
+                        repeat=False,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    test_loader = _build_loader(
+                        dataset=prot_test_stream,
+                        tokenizer=prot_tokenizer,
+                        seq_len=int(args.test_seq_len),
+                        batch_size=int(args.batch_size),
+                        text_key=args.prot_text_key,
+                        repeat=False,
+                        mlm_probability=float(args.mlm_prob),
+                    )
+                    phase_name = "protein"
 
                 print(
                     f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
                     f"drop={drop_step} device={device}"
                 )
 
-                train_cfg_nl = MLMTrainConfig(
+                max_evals = int(args.max_evals_nl) if args.dataset == "nl" else int(args.max_evals_prot)
+                train_cfg = MLMTrainConfig(
                     steps_per_eval=int(args.steps),
-                    max_evals=int(args.max_evals_nl),
-                    patience=int(args.patience),
-                    warmup_steps=int(args.steps),
-                    batch_size=int(args.batch_size),
-                    lr=float(args.lr),
-                    weight_decay=float(args.weight_decay),
-                    eval_batches=int(args.eval_batches),
-                    drop_positions_step=None if drop_step < 0 else int(drop_step),
-                    amp=bool(args.amp),
-                    mlm_probability=float(args.mlm_prob),
-                )
-
-                train_cfg_prot = MLMTrainConfig(
-                    steps_per_eval=int(args.steps),
-                    max_evals=int(args.max_evals_prot),
+                    max_evals=max_evals,
                     patience=int(args.patience),
                     warmup_steps=int(args.steps),
                     batch_size=int(args.batch_size),
@@ -258,41 +259,22 @@ def main() -> None:
                 )
 
                 global_step = 0
-                nl_summary, global_step = train_mlm_phase(
+                summary, global_step = train_mlm_phase(
                     model=model,
-                    train_cfg=train_cfg_nl,
+                    train_cfg=train_cfg,
                     device=device,
-                    train_iter=iter(nl_train_loader),
-                    valid_loader=nl_valid_loader,
+                    train_iter=iter(train_loader),
+                    valid_loader=valid_loader,
                     progress=args.progress,
-                    phase_name="nl",
+                    phase_name=phase_name,
                     history_rows=history_rows,
                     start_global_step=global_step,
                 )
 
-                prot_summary, global_step = train_mlm_phase(
-                    model=model,
-                    train_cfg=train_cfg_prot,
-                    device=device,
-                    train_iter=iter(prot_train_loader),
-                    valid_loader=prot_valid_loader,
-                    progress=args.progress,
-                    phase_name="protein",
-                    history_rows=history_rows,
-                    start_global_step=global_step,
-                )
-
-                nl_test_metrics = eval_mlm(
+                test_metrics = eval_mlm(
                     model=model,
                     device=device,
-                    loader=nl_test_loader,
-                    eval_batches=int(args.eval_batches),
-                    amp=bool(args.amp),
-                )
-                prot_test_metrics = eval_mlm(
-                    model=model,
-                    device=device,
-                    loader=prot_test_loader,
+                    loader=test_loader,
                     eval_batches=int(args.eval_batches),
                     amp=bool(args.amp),
                 )
@@ -302,31 +284,40 @@ def main() -> None:
                 del model
                 torch.cuda.empty_cache()
 
-                rows.append(
-                    {
-                        "seed": seed,
-                        "attention_type": attention_type,
-                        "positional_mode": positional_mode,
-                        "drop_positions_step": -1 if drop_step < 0 else int(drop_step),
-                        "d_model": int(args.d_model),
-                        "n_layers": int(args.n_layers),
-                        "head_size": int(head_size),
-                        "train_seq_len": int(args.train_seq_len),
-                        "test_seq_len": int(args.test_seq_len),
-                        "nl_best_eval_idx": nl_summary["best_eval_idx"],
-                        "nl_best_eval_acc": nl_summary["best_eval_acc"],
-                        "prot_best_eval_idx": prot_summary["best_eval_idx"],
-                        "prot_best_eval_acc": prot_summary["best_eval_acc"],
-                        "nl_test_loss": nl_test_metrics["loss"],
-                        "nl_test_acc": nl_test_metrics["acc"],
-                        "nl_test_f1": nl_test_metrics["f1"],
-                        "nl_test_mcc": nl_test_metrics["mcc"],
-                        "prot_test_loss": prot_test_metrics["loss"],
-                        "prot_test_acc": prot_test_metrics["acc"],
-                        "prot_test_f1": prot_test_metrics["f1"],
-                        "prot_test_mcc": prot_test_metrics["mcc"],
-                    }
-                )
+                row = {
+                    "seed": seed,
+                    "attention_type": attention_type,
+                    "positional_mode": positional_mode,
+                    "drop_positions_step": -1 if drop_step < 0 else int(drop_step),
+                    "d_model": int(args.d_model),
+                    "n_layers": int(args.n_layers),
+                    "head_size": int(head_size),
+                    "train_seq_len": int(args.train_seq_len),
+                    "test_seq_len": int(args.test_seq_len),
+                }
+                if args.dataset == "nl":
+                    row.update(
+                        {
+                            "nl_best_eval_idx": summary["best_eval_idx"],
+                            "nl_best_eval_acc": summary["best_eval_acc"],
+                            "nl_test_loss": test_metrics["loss"],
+                            "nl_test_acc": test_metrics["acc"],
+                            "nl_test_f1": test_metrics["f1"],
+                            "nl_test_mcc": test_metrics["mcc"],
+                        }
+                    )
+                else:
+                    row.update(
+                        {
+                            "prot_best_eval_idx": summary["best_eval_idx"],
+                            "prot_best_eval_acc": summary["best_eval_acc"],
+                            "prot_test_loss": test_metrics["loss"],
+                            "prot_test_acc": test_metrics["acc"],
+                            "prot_test_f1": test_metrics["f1"],
+                            "prot_test_mcc": test_metrics["mcc"],
+                        }
+                    )
+                rows.append(row)
 
                 # Attach run metadata to history
                 for row in history_rows:
