@@ -68,7 +68,7 @@ def main() -> None:
     set_global_seed(0)
 
     # Fixed modeling choices for simplicity:
-    # - n_heads scales with d_model (keep head dim ~32 where possible)
+    # - head_size is fixed (64 default, 128 for dual_triangle)
     # - d_ff = 3 * d_model
     d_models = sorted(list(args.d_models), reverse=True)
     n_layers_list = sorted(list(args.n_layers), reverse=True)
@@ -101,22 +101,17 @@ def main() -> None:
                     for n_layers in n_layers_list:
                         run_idx += 1
 
-                        # keep head dim reasonable; ensure divisible
-                        if d_model >= 128:
-                            n_heads = 4
-                        elif d_model >= 64:
-                            n_heads = 2
-                        else:
-                            n_heads = 1
-                        if d_model % n_heads != 0:
-                            continue
+                        # Use head_size instead of n_heads
+                        head_size = 128 if attention_type == "dual_triangle" else 64
+                        if head_size > d_model:
+                            head_size = d_model
 
                         model_cfg = TransformerConfig(
                             vocab_size=args.vocab_size,
                             seq_len=args.seq_len,
                             d_model=d_model,
                             n_layers=n_layers,
-                            n_heads=n_heads,
+                            head_size=head_size,
                             d_ff=3 * d_model,
                             dropout=float(args.dropout),
                             attention_type=attention_type,
@@ -160,15 +155,19 @@ def main() -> None:
     # We run len(seeds) controls for each attention type, last.
     control_d_model = max(d_models)
     control_n_layers = max(n_layers_list)
-    control_n_heads = 4 if control_d_model >= 128 else 2
     for seed in args.seeds:
         for attention_type in attention_types:
+            # Use head_size instead of n_heads
+            head_size = 128 if attention_type == "dual_triangle" else 64
+            if head_size > control_d_model:
+                head_size = control_d_model
+
             model_cfg = TransformerConfig(
                 vocab_size=args.vocab_size,
                 seq_len=args.seq_len,
                 d_model=control_d_model,
                 n_layers=control_n_layers,
-                n_heads=control_n_heads,
+                head_size=head_size,
                 d_ff=4 * control_d_model,
                 dropout=float(args.dropout),
                 attention_type=attention_type,

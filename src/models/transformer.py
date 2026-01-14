@@ -17,7 +17,7 @@ class TransformerConfig:
     seq_len: int
     d_model: int
     n_layers: int
-    n_heads: int
+    head_size: int
     d_ff: int
     dropout: float
     attention_type: str  # "causal" | "bidirectional" | "dual_triangle"
@@ -97,24 +97,31 @@ class SwiGLUMLP(nn.Module):
 
 
 class MultiheadSelfAttention(nn.Module):
-    def __init__(self, *, d_model: int, n_heads: int, dropout: float, attention_type: str) -> None:
+    def __init__(self, *, d_model: int, head_size: int, dropout: float, attention_type: str) -> None:
         super().__init__()
-        if d_model % n_heads != 0:
-            raise ValueError(f"d_model={d_model} must be divisible by n_heads={n_heads}")
+        if d_model % head_size != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by head_size={head_size}")
 
         if attention_type not in {"causal", "bidirectional"}:
             raise ValueError(f"attention_type must be causal|bidirectional, got {attention_type}")
 
         self.d_model = d_model
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads
+        self.n_heads = d_model // head_size
+        self.d_head = head_size
         self.attention_type = attention_type
         self.dropout = dropout
 
         self.qkv = Linear(d_model, 3 * d_model)
         self.proj = Linear(d_model, d_model)
 
-    def forward(self, x: torch.Tensor, *, rope_cos: Optional[torch.Tensor], rope_sin: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        rope_cos: Optional[torch.Tensor],
+        rope_sin: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         # x: (b, l, d)
         bsz, t, _ = x.shape
         qkv = self.qkv(x)  # (b, l, 3d)
@@ -133,18 +140,42 @@ class MultiheadSelfAttention(nn.Module):
             q = _apply_rope(q, rope_cos, rope_sin)
             k = _apply_rope(k, rope_cos, rope_sin)
 
+        attn_mask = None
+        if attention_mask is not None:
+            if attention_mask.ndim != 2:
+                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
+            mask = attention_mask.bool()
+            key_keep = mask[:, None, None, :]  # (b, 1, 1, t)
+            if self.attention_type == "causal":
+                causal = torch.tril(torch.ones(t, t, dtype=torch.bool, device=x.device))
+                allowed = causal[None, None, :, :] & key_keep
+                attn_mask = torch.where(
+                    allowed,
+                    torch.zeros_like(allowed, dtype=x.dtype),
+                    torch.full_like(allowed, float("-inf"), dtype=x.dtype),
+                )
+            else:
+                attn_mask = torch.where(
+                    key_keep,
+                    torch.zeros_like(key_keep, dtype=x.dtype),
+                    torch.full_like(key_keep, float("-inf"), dtype=x.dtype),
+                )
+
         # scaled_dot_product_attention returns (b, h, l, d_head)
         if self.attention_type == "causal":
+            is_causal = attn_mask is None
             attn_out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True
+                q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=is_causal
             )
         else:
             attn_out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=False
+                q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False
             )
 
         # (b, h, l, d_head) -> (b, l, d)
         attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, t, self.d_model)
+        if attention_mask is not None:
+            attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
         return self.proj(attn_out)
 
 
@@ -161,27 +192,33 @@ class DualTriangleAttention(nn.Module):
         self,
         *,
         d_model: int,
-        n_heads: int,
+        head_size: int,
         dropout: float,
     ) -> None:
         super().__init__()
-        if d_model % n_heads != 0:
-            raise ValueError(f"d_model={d_model} must be divisible by n_heads={n_heads}")
+        if d_model % head_size != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by head_size={head_size}")
 
-        d_head = d_model // n_heads
-        if d_head % 2 != 0:
-            raise ValueError(f"d_head={d_head} must be even (d_model/n_heads must be divisible by 2)")
+        if head_size % 2 != 0:
+            raise ValueError(f"head_size={head_size} must be even (required for dual triangle splitting)")
 
         self.d_model = d_model
-        self.n_heads = n_heads
-        self.d_head = d_head
-        self.half_d = d_head // 2
+        self.n_heads = d_model // head_size
+        self.d_head = head_size
+        self.half_d = head_size // 2
         self.dropout = dropout
 
         self.qkv = Linear(d_model, 3 * d_model)
         self.proj = Linear(d_model, d_model)
 
-    def forward(self, x: torch.Tensor, *, rope_cos: Optional[torch.Tensor], rope_sin: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        rope_cos: Optional[torch.Tensor],
+        rope_sin: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         bsz, seq_len, _ = x.shape
 
         # Project to Q, K, V and reshape for multi-head attention
@@ -221,6 +258,15 @@ class DualTriangleAttention(nn.Module):
         # Combine: lower triangle (past/self) uses attn_down, upper triangle (future) uses attn_up
         attn_logits = torch.where(lower_mask, attn_down, attn_up)
 
+        key_mask = None
+        if attention_mask is not None:
+            if attention_mask.ndim != 2:
+                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
+            key_mask = attention_mask.bool()[:, None, None, :]
+            attn_logits = attn_logits.masked_fill(~key_mask, float("-inf"))
+            key_any = key_mask.any(dim=-1, keepdim=True)
+            attn_logits = torch.where(key_any, attn_logits, torch.zeros_like(attn_logits))
+
         # Softmax over keys dimension
         attn_weights = F.softmax(attn_logits, dim=-1)
 
@@ -233,19 +279,21 @@ class DualTriangleAttention(nn.Module):
 
         # Reshape back: (b, h, l, d_head) -> (b, l, d)
         attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+        if attention_mask is not None:
+            attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
         return self.proj(attn_out)
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, *, d_model: int, n_heads: int, d_ff: int, dropout: float, attention_type: str) -> None:
+    def __init__(self, *, d_model: int, head_size: int, d_ff: int, dropout: float, attention_type: str) -> None:
         super().__init__()
         self.ln1 = nn.LayerNorm(d_model)
         if attention_type == "dual_triangle":
-            self.attn = DualTriangleAttention(d_model=d_model, n_heads=n_heads, dropout=dropout)
+            self.attn = DualTriangleAttention(d_model=d_model, head_size=head_size, dropout=dropout)
             self._attn_kind = "dual_triangle"
         else:
             self.attn = MultiheadSelfAttention(
-                d_model=d_model, n_heads=n_heads, dropout=dropout, attention_type=attention_type
+                d_model=d_model, head_size=head_size, dropout=dropout, attention_type=attention_type
             )
             self._attn_kind = "sdpa"
         self.drop1 = nn.Dropout(dropout)
@@ -254,8 +302,17 @@ class TransformerBlock(nn.Module):
         self.mlp = SwiGLUMLP(d_model=d_model, d_ff=d_ff, dropout=dropout)
         self.drop2 = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, *, rope_cos: Optional[torch.Tensor], rope_sin: Optional[torch.Tensor]) -> torch.Tensor:
-        x = x + self.drop1(self.attn(self.ln1(x), rope_cos=rope_cos, rope_sin=rope_sin))
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        rope_cos: Optional[torch.Tensor],
+        rope_sin: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        x = x + self.drop1(
+            self.attn(self.ln1(x), rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=attention_mask)
+        )
         x = x + self.drop2(self.mlp(self.ln2(x)))
         return x
 
@@ -287,12 +344,11 @@ class PositionProbeTransformer(nn.Module):
         else:
             self.pos_emb = None
         if cfg.positional_mode == "rotary":
-            if cfg.d_model % cfg.n_heads != 0:
-                raise ValueError(f"d_model={cfg.d_model} must be divisible by n_heads={cfg.n_heads}")
-            d_head = cfg.d_model // cfg.n_heads
-            if d_head % 2 != 0:
-                raise ValueError(f"RoPE requires even d_head, got d_head={d_head}")
-            self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=d_head)
+            if cfg.d_model % cfg.head_size != 0:
+                raise ValueError(f"d_model={cfg.d_model} must be divisible by head_size={cfg.head_size}")
+            if cfg.head_size % 2 != 0:
+                raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
+            self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
         else:
             self.rope = None
 
@@ -301,7 +357,7 @@ class PositionProbeTransformer(nn.Module):
             [
                 TransformerBlock(
                     d_model=cfg.d_model,
-                    n_heads=cfg.n_heads,
+                    head_size=cfg.head_size,
                     d_ff=cfg.d_ff,
                     dropout=cfg.dropout,
                     attention_type=cfg.attention_type,
@@ -354,7 +410,7 @@ class PositionProbeTransformer(nn.Module):
 
         h = self.drop_in(h) # (b, l, d)
         for blk in self.blocks:
-            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin)
+            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=None)
         h = self.ln_f(h) # (b, l, d)
 
         # Pool across positions
@@ -364,3 +420,90 @@ class PositionProbeTransformer(nn.Module):
         logits = self.classifier(pooled)  # (b, l)
         return logits
 
+
+class TransformerLM(nn.Module):
+    """
+    Decoder-only transformer that returns per-token logits for language modeling.
+
+    - Supports positional_mode: none | learned_abs | rotary
+    - Supports attention_type: causal | bidirectional | dual_triangle
+    - Allows variable sequence length <= cfg.seq_len
+    """
+
+    def __init__(self, cfg: TransformerConfig) -> None:
+        super().__init__()
+        if cfg.positional_mode not in {"none", "learned_abs", "rotary"}:
+            raise ValueError(f"positional_mode must be none|learned_abs|rotary, got {cfg.positional_mode}")
+        if cfg.attention_type not in {"causal", "bidirectional", "dual_triangle"}:
+            raise ValueError(f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}")
+
+        self.cfg = cfg
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+
+        if cfg.positional_mode == "learned_abs":
+            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.d_model))
+            nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
+        else:
+            self.pos_emb = None
+
+        if cfg.positional_mode == "rotary":
+            if cfg.d_model % cfg.head_size != 0:
+                raise ValueError(f"d_model={cfg.d_model} must be divisible by head_size={cfg.head_size}")
+            if cfg.head_size % 2 != 0:
+                raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
+            self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
+        else:
+            self.rope = None
+
+        self.drop_in = nn.Dropout(cfg.dropout)
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    d_model=cfg.d_model,
+                    head_size=cfg.head_size,
+                    d_ff=cfg.d_ff,
+                    dropout=cfg.dropout,
+                    attention_type=cfg.attention_type,
+                )
+                for _ in range(cfg.n_layers)
+            ]
+        )
+        self.ln_f = nn.LayerNorm(cfg.d_model)
+        self.lm_head = Linear(cfg.d_model, cfg.vocab_size)
+
+        self._positions_enabled = True
+
+    def set_positions_enabled(self, enabled: bool) -> None:
+        self._positions_enabled = enabled
+
+    def forward(self, x: torch.Tensor, *, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        # x: (b, t)
+        if x.ndim != 2:
+            raise ValueError(f"Expected x of shape (b, t), got {tuple(x.shape)}")
+        if x.shape[1] > self.cfg.seq_len:
+            raise ValueError(f"Expected seq_len <= {self.cfg.seq_len}, got {x.shape[1]}")
+        if attention_mask is not None:
+            if attention_mask.ndim != 2:
+                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
+            if attention_mask.shape[0] != x.shape[0] or attention_mask.shape[1] != x.shape[1]:
+                raise ValueError(
+                    f"attention_mask shape {tuple(attention_mask.shape)} must match input shape {tuple(x.shape)}"
+                )
+
+        h = self.tok_emb(x)
+        if self.pos_emb is not None and self._positions_enabled:
+            h = h + self.pos_emb[: h.shape[1]].unsqueeze(0)
+
+        rope_cos = None
+        rope_sin = None
+        if self.rope is not None and self._positions_enabled:
+            rope_cos, rope_sin = self.rope(device=h.device, dtype=h.dtype)
+            rope_cos = rope_cos[:, :, : h.shape[1], :]
+            rope_sin = rope_sin[:, :, : h.shape[1], :]
+
+        h = self.drop_in(h)
+        for blk in self.blocks:
+            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=attention_mask)
+        h = self.ln_f(h)
+        logits = self.lm_head(h)
+        return logits

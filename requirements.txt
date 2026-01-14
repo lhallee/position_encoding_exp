@@ -3,3 +3,7 @@ pandas>=2.2
 matplotlib>=3.8
 seaborn>=0.13
 tqdm>=4.66
+torch>=2.2
+transformers>=4.40
+datasets>=2.19
+scikit-learn>=1.4

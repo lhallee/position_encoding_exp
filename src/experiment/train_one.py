@@ -213,7 +213,7 @@ def train_one(
         "label_mode": train_cfg.label_mode,
         "n_layers": model_cfg.n_layers,
         "d_model": model_cfg.d_model,
-        "n_heads": model_cfg.n_heads,
+        "head_size": model_cfg.head_size,
         "d_ff": model_cfg.d_ff,
         "steps_per_eval": train_cfg.steps_per_eval,
         "max_evals": train_cfg.max_evals,

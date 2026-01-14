@@ -24,25 +24,25 @@ def _style() -> None:
 
 def _pretty_attention(attn: str) -> str:
     if attn == "causal":
-        return "Causal (unidirectional)"
+        return "Causal"
     if attn == "bidirectional":
         return "Bidirectional"
     if attn == "dual_triangle":
-        return "DualTriangle (bidirectional+)"
+        return "DualTriangle"
     return attn
 
 
 def _pretty_condition(positional_mode: str, drop_positions_step: int) -> str:
     if positional_mode == "none":
-        return "No positional embeddings"
+        return "None"
     if positional_mode == "learned_abs" and int(drop_positions_step) < 0:
-        return "Learned absolute positions"
+        return "Absolute"
     if positional_mode == "learned_abs" and int(drop_positions_step) >= 0:
-        return "Drop positions after eval #2 (DroPE-like)"
+        return "DroPE"
     if positional_mode == "rotary" and int(drop_positions_step) < 0:
-        return "Rotary positions (RoPE)"
+        return "RoPE"
     if positional_mode == "rotary" and int(drop_positions_step) >= 0:
-        return "Drop rotary after eval #2 (RoPE off)"
+        return "RoPE off"
     return f"{positional_mode} (drop={int(drop_positions_step)})"
 
 
@@ -75,7 +75,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     # Note: `eval_acc` is the LAST eval accuracy from training (not best), by design.
     gdf = (
         df.groupby(
-            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model"],
+            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model", "head_size"],
             as_index=False,
         )["eval_acc"]
         .agg(["mean", "std"])
@@ -88,8 +88,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         _pretty_condition(pm, ds) for pm, ds in zip(gdf["positional_mode"], gdf["drop_positions_step"])
     ]
     gdf["Label mode"] = gdf["label_mode"].map({"true": "True labels", "random": "Random labels (control)"})
-    gdf["Number of layers"] = gdf["n_layers"]
-    gdf["Hidden size"] = gdf["d_model"]
+    gdf["Layers"] = gdf["n_layers"]
+    gdf["Hidden Size"] = gdf["d_model"]
 
     chance = 1.0 / float(df["seq_len"].iloc[0])
 
@@ -97,14 +97,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     # Figure 1: Heatmap grid (true labels)
     # ----------------------------
     hdf = gdf[gdf["label_mode"] == "true"].copy()
-    conditions = [
-        "No positional embeddings",
-        "Learned absolute positions",
-        "Drop positions after eval #2 (DroPE-like)",
-        "Rotary positions (RoPE)",
-        "Drop rotary after eval #2 (RoPE off)",
-    ]
-    attention_order = ["Bidirectional", "DualTriangle (bidirectional+)", "Causal (unidirectional)"]
+    conditions = ["None", "Absolute", "DroPE", "RoPE", "RoPE off"]
+    attention_order = ["Bidirectional", "DualTriangle", "Causal"]
 
     fig, axes = plt.subplots(
         nrows=len(attention_order),
@@ -130,7 +124,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 sns.despine(ax=ax, left=True, bottom=True)
                 continue
 
-            pivot = sdf.pivot(index="Number of layers", columns="Hidden size", values="eval_acc_mean")
+            pivot = sdf.pivot(index="Layers", columns="Hidden Size", values="eval_acc_mean")
 
             last_hm = sns.heatmap(
                 pivot,
@@ -147,10 +141,10 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 square=True,
             )
             if c == 0:
-                ax.set_ylabel(f"{attn}\n\nNumber of layers")
+                ax.set_ylabel(f"{attn}\n\nLayers")
             else:
                 ax.set_ylabel("")
-            ax.set_xlabel("Hidden size" if r == len(attention_order) - 1 else "")
+            ax.set_xlabel("Hidden Size" if r == len(attention_order) - 1 else "")
             ax.tick_params(axis="x", rotation=0)
             ax.tick_params(axis="y", rotation=0)
             sns.despine(ax=ax, left=False, bottom=False)
@@ -206,11 +200,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
             sdf_raw["Condition"] = [
                 _pretty_condition(pm, ds) for pm, ds in zip(sdf_raw["positional_mode"], sdf_raw["drop_positions_step"])
             ]
-            hue_order = [
-                "No positional embeddings",
-                "Drop positions after eval #2 (DroPE-like)",
-                "Learned absolute positions",
-            ]
+            hue_order = ["None", "DroPE", "Absolute"]
             fig, ax = plt.subplots(figsize=(8.6, 3.8), constrained_layout=True)
             stats = _group_stats(sdf_raw, ["Attention", "Condition"])
             stats["Attention"] = pd.Categorical(stats["Attention"], categories=attention_order, ordered=True)
@@ -245,7 +235,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
             ax.set_xlabel("")
             ax.set_ylabel("Accuracy")
             ax.set_ylim(0.0, 1.0)
-            ax.legend(title="", frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+            ax.legend(title="Positional Encoding", frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
             sns.despine(ax=ax)
             _savefig(fig, out_dir, "figure3_largest_model_comparison")
             plt.close(fig)
@@ -256,21 +246,22 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     ndf = df[(df["label_mode"] == "true") & (df["positional_mode"] == "none")].copy()
     if len(ndf) > 0:
         ndf["Attention"] = ndf["attention_type"].map(_pretty_attention)
-        ndf["Number of layers"] = ndf["n_layers"]
-        ndf["Hidden size"] = ndf["d_model"]
+        ndf["Layers"] = ndf["n_layers"]
+        ndf["Hidden Size"] = ndf["d_model"]
 
-        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(10.2, 3.8), sharey=True, constrained_layout=False)
-        layer_vals = sorted(ndf["Number of layers"].unique())
+        fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(13.2, 3.8), sharey=True, constrained_layout=True)
+        layer_vals = sorted(ndf["Layers"].unique())
         layer_colors = sns.color_palette("viridis", n_colors=len(layer_vals))
 
         for ax, attn in zip(axes, attention_order):
+            ax.set_title(attn)
             sdf = ndf[ndf["Attention"] == attn]
-            stats = _group_stats(sdf, ["Number of layers", "Hidden size"]).sort_values(["Number of layers", "Hidden size"])
+            stats = _group_stats(sdf, ["Layers", "Hidden Size"]).sort_values(["Layers", "Hidden Size"])
             for color, layer in zip(layer_colors, layer_vals):
-                sub = stats[stats["Number of layers"] == layer]
-                ax.plot(sub["Hidden size"], sub["acc_mean"], marker="o", color=color, linewidth=1.8, label=str(layer))
+                sub = stats[stats["Layers"] == layer]
+                ax.plot(sub["Hidden Size"], sub["acc_mean"], marker="o", color=color, linewidth=1.8, label=str(layer))
                 ax.errorbar(
-                    sub["Hidden size"],
+                    sub["Hidden Size"],
                     sub["acc_mean"],
                     yerr=sub["acc_ci95"],
                     fmt="none",
@@ -280,12 +271,11 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                     capthick=1.0,
                 )
             ax.axhline(chance, color="black", linestyle="--", linewidth=1.0)
-            ax.set_xlabel("Hidden size")
+            ax.set_xlabel("Hidden Size")
             ax.set_ylabel("Accuracy" if attn == attention_order[0] else "")
             ax.set_ylim(0.0, 1.0)
-            ax.legend(title="Number of layers", frameon=False, loc="lower right")
+            ax.legend(title="Layers", frameon=False, loc="lower right")
             sns.despine(ax=ax)
 
-        fig.tight_layout()
         _savefig(fig, out_dir, "figure4_no_positional_embeddings_key_view")
         plt.close(fig)
