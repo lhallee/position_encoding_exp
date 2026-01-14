@@ -75,7 +75,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     # Note: `eval_acc` is the LAST eval accuracy from training (not best), by design.
     gdf = (
         df.groupby(
-            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model", "head_size"],
+            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model"],
             as_index=False,
         )["eval_acc"]
         .agg(["mean", "std"])
