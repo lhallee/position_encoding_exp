@@ -1,11 +1,9 @@
-from __future__ import annotations
-
-from pathlib import Path
-
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+
+from pathlib import Path
 
 
 def _style() -> None:
@@ -29,6 +27,8 @@ def _pretty_attention(attn: str) -> str:
         return "Causal (unidirectional)"
     if attn == "bidirectional":
         return "Bidirectional"
+    if attn == "dual_triangle":
+        return "DualTriangle (bidirectional+)"
     return attn
 
 
@@ -39,6 +39,10 @@ def _pretty_condition(positional_mode: str, drop_positions_step: int) -> str:
         return "Learned absolute positions"
     if positional_mode == "learned_abs" and int(drop_positions_step) >= 0:
         return "Drop positions after eval #2 (DroPE-like)"
+    if positional_mode == "rotary" and int(drop_positions_step) < 0:
+        return "Rotary positions (RoPE)"
+    if positional_mode == "rotary" and int(drop_positions_step) >= 0:
+        return "Drop rotary after eval #2 (RoPE off)"
     return f"{positional_mode} (drop={int(drop_positions_step)})"
 
 
@@ -96,8 +100,10 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         "No positional embeddings",
         "Learned absolute positions",
         "Drop positions after eval #2 (DroPE-like)",
+        "Rotary positions (RoPE)",
+        "Drop rotary after eval #2 (RoPE off)",
     ]
-    attention_order = ["Bidirectional", "Causal (unidirectional)"]
+    attention_order = ["Bidirectional", "DualTriangle (bidirectional+)", "Causal (unidirectional)"]
 
     fig, axes = plt.subplots(
         nrows=len(attention_order),
@@ -115,6 +121,14 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         for c, cond in enumerate(conditions):
             ax = axes[r, c]
             sdf = hdf[(hdf["Attention"] == attn) & (hdf["Condition"] == cond)]
+            if len(sdf) == 0:
+                ax.set_title(cond if r == 0 else "")
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                sns.despine(ax=ax, left=True, bottom=True)
+                continue
+
             pivot = sdf.pivot(index="Number of layers", columns="Hidden size", values="eval_acc_mean")
 
             last_hm = sns.heatmap(
