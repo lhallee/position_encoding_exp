@@ -72,6 +72,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     df = pd.read_csv(results_csv)
 
     # Aggregate over seeds: mean and std for error reporting.
+    # Note: `eval_acc` is the LAST eval accuracy from training (not best), by design.
     gdf = (
         df.groupby(
             ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model"],

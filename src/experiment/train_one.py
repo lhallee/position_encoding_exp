@@ -109,6 +109,7 @@ def train_one(
     best_acc = -1.0
     best_eval_idx = -1
     bad_evals = 0
+    last_acc = -1.0
 
     global_step = 0
     for eval_idx in range(train_cfg.max_evals):
@@ -172,6 +173,7 @@ def train_one(
             label_mode=train_cfg.label_mode,
             amp=train_cfg.amp,
         )
+        last_acc = acc
 
         improved = acc > best_acc
         if improved:
@@ -183,9 +185,11 @@ def train_one(
 
         # If we ever hit perfect accuracy, stop immediately and report that score.
         # (Accuracy is computed from integer counts, so >= 1.0 is safe.)
-        if acc >= 1.0:
+        # Do NOT do this for DroPE runs: they may "grok" then degrade after dropping positions.
+        if train_cfg.drop_positions_step is None and acc >= 1.0:
             best_acc = 1.0
             best_eval_idx = eval_idx
+            last_acc = 1.0
             break
 
         if progress:
@@ -217,6 +221,8 @@ def train_one(
         "weight_decay": train_cfg.weight_decay,
         "eval_batches": train_cfg.eval_batches,
         "amp": int(bool(train_cfg.amp)),
-        "eval_acc": float(best_acc),
+        # Report last eval accuracy (especially important when stopping due to patience).
+        "eval_acc": float(last_acc),
+        "best_eval_acc": float(best_acc),
     }
 

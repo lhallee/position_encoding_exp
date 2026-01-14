@@ -32,7 +32,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability (default: 0.0).")
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
-    parser.add_argument("--flush_every", type=int, default=10, help="Write results.csv every N runs (0=only at end).")
+    parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
     return parser.parse_args()
 
 
