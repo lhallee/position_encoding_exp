@@ -1,6 +1,7 @@
+import src.entrypoint_setup
+
 import math
 import sys
-import src.entrypoint_setup
 import torch
 import torch.nn as nn
 from tqdm import trange
@@ -212,9 +213,9 @@ def train_one(
         "drop_positions_step": -1 if train_cfg.drop_positions_step is None else train_cfg.drop_positions_step,
         "label_mode": train_cfg.label_mode,
         "n_layers": model_cfg.n_layers,
-        "d_model": model_cfg.d_model,
+        "hidden_size": model_cfg.hidden_size,
         "head_size": model_cfg.head_size,
-        "d_ff": model_cfg.d_ff,
+        "intermediate_size": model_cfg.intermediate_size,
         "steps_per_eval": train_cfg.steps_per_eval,
         "max_evals": train_cfg.max_evals,
         "patience": train_cfg.patience,

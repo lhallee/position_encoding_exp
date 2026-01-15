@@ -1,11 +1,11 @@
 import src.entrypoint_setup
 
 import argparse
-from pathlib import Path
-from typing import Iterable
-
+import itertools
 import pandas as pd
 import torch
+from pathlib import Path
+from typing import Iterable
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
@@ -28,10 +28,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience on eval accuracy.")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
     parser.add_argument("--eval_batches", type=int, default=8, help="Evaluation batches.")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33], help="Random seeds.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[11], help="Random seeds.")
     parser.add_argument("--train_seq_len", type=int, default=128, help="Training sequence length.")
     parser.add_argument("--test_seq_len", type=int, default=512, help="Extended test sequence length.")
-    parser.add_argument("--d_model", type=int, default=768, help="Hidden size.")
+    parser.add_argument("--hidden_size", type=int, default=768, help="Hidden size.")
     parser.add_argument("--n_layers", type=int, default=12, help="Number of layers.")
     parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
@@ -48,8 +48,8 @@ def _parse_args() -> argparse.Namespace:
         choices=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
         help="Which positional/Drop conditions to run.",
     )
-    parser.add_argument("--fineweb_valid_docs", type=int, default=2000, help="FineWeb-Edu validation docs.")
-    parser.add_argument("--fineweb_test_docs", type=int, default=2000, help="FineWeb-Edu test docs.")
+    parser.add_argument("--valid_size", type=int, default=2000, help="Validation sample count (NL + protein).")
+    parser.add_argument("--test_size", type=int, default=2000, help="Test sample count (NL + protein).")
     parser.add_argument("--fineweb_text_key", type=str, default="text", help="Text field in FineWeb-Edu.")
     parser.add_argument("--prot_text_key", type=str, default="sequence", help="Sequence field in omg_prot50.")
     parser.add_argument("--shuffle_buffer", type=int, default=10000, help="Streaming shuffle buffer size.")
@@ -66,20 +66,111 @@ def _device_from_arg(device_arg: str) -> torch.device:
     raise ValueError(f"device must be auto|cpu|cuda, got {device_arg}")
 
 
-def _fineweb_streams(*, seed: int, shuffle_buffer: int, valid_docs: int, test_docs: int) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
+def _select_text(sample: dict, text_key: str) -> str:
+    if text_key not in sample:
+        keys = list(sample.keys())
+        raise KeyError(f"Expected key '{text_key}' in sample, got keys={keys}")
+    value = sample[text_key]
+    if not isinstance(value, str):
+        raise ValueError(f"Expected '{text_key}' to be a string, got {type(value)}")
+    return value
+
+
+def _take_n(it: Iterable[dict], n: int, *, name: str) -> list[dict]:
+    if n <= 0:
+        raise ValueError(f"{name} size must be > 0, got {n}")
+    items = list(itertools.islice(it, n))
+    if len(items) < n:
+        raise ValueError(f"{name} expected at least {n} items, got {len(items)}")
+    return items
+
+
+def _take_n_filtered_with_consumed(
+    it: Iterable[dict],
+    n: int,
+    *,
+    name: str,
+    tokenizer,
+    text_key: str,
+    min_tokens: int,
+) -> tuple[list[dict], int]:
+    if n <= 0:
+        raise ValueError(f"{name} size must be > 0, got {n}")
+    if min_tokens <= 0:
+        raise ValueError(f"{name} min_tokens must be > 0, got {min_tokens}")
+    items: list[dict] = []
+    consumed = 0
+    for sample in it:
+        consumed += 1
+        text = _select_text(sample, text_key)
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        if len(token_ids) < int(min_tokens):
+            continue
+        items.append(sample)
+        if len(items) >= n:
+            break
+    if len(items) < n:
+        raise ValueError(f"{name} expected at least {n} items after filtering, got {len(items)}")
+    return items, consumed
+
+
+def _fineweb_streams(
+    *,
+    seed: int,
+    shuffle_buffer: int,
+    valid_size: int,
+    test_size: int,
+    tokenizer,
+    text_key: str,
+    test_seq_len: int,
+) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
     base = load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
     base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
-    valid = base.take(valid_docs)
-    test = base.skip(valid_docs).take(test_docs)
-    train = base.skip(valid_docs + test_docs)
+    valid = _take_n(base.take(valid_size), valid_size, name="FineWeb valid")
+
+    test_candidates = base.skip(valid_size)
+    test, consumed = _take_n_filtered_with_consumed(
+        test_candidates,
+        test_size,
+        name="FineWeb test",
+        tokenizer=tokenizer,
+        text_key=text_key,
+        min_tokens=int(test_seq_len),
+    )
+
+    train = base.skip(valid_size + consumed)
     return train, valid, test
 
 
-def _protein_streams(*, seed: int, shuffle_buffer: int) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
+def _protein_streams(
+    *,
+    seed: int,
+    shuffle_buffer: int,
+    valid_size: int,
+    test_size: int,
+    tokenizer,
+    text_key: str,
+    test_seq_len: int,
+) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
+    if valid_size > 10000:
+        raise ValueError(f"Protein valid_size must be <= 10000, got {valid_size}")
+    if test_size > 10000:
+        raise ValueError(f"Protein test_size must be <= 10000, got {test_size}")
+
     train = load_dataset("Synthyra/omg_prot50", split="train", streaming=True)
     train = train.shuffle(seed=seed, buffer_size=shuffle_buffer)
-    valid = load_dataset("Synthyra/omg_prot50", split="valid", streaming=True)
-    test = load_dataset("Synthyra/omg_prot50", split="test", streaming=True)
+    valid_stream = load_dataset("Synthyra/omg_prot50", split="valid", streaming=True)
+    test_stream = load_dataset("Synthyra/omg_prot50", split="test", streaming=True)
+
+    valid = _take_n(valid_stream, valid_size, name="Protein valid")
+    test, _ = _take_n_filtered_with_consumed(
+        test_stream,
+        test_size,
+        name="Protein test",
+        tokenizer=tokenizer,
+        text_key=text_key,
+        min_tokens=int(test_seq_len),
+    )
     return train, valid, test
 
 
@@ -113,12 +204,18 @@ def main() -> None:
     args = _parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = out_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     device = _device_from_arg(args.device)
     set_global_seed(0)
 
-    nl_tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
-    prot_tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
+    if args.dataset == "nl":
+        tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
+        text_key = args.fineweb_text_key
+    else:
+        tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
+        text_key = args.prot_text_key
 
     drop_after = int(2 * args.steps)
     condition_map: dict[str, tuple[str, int]] = {
@@ -139,105 +236,76 @@ def main() -> None:
 
     for seed in args.seeds:
         if args.dataset == "nl":
-            nl_train_stream, nl_valid_stream, nl_test_stream = _fineweb_streams(
+            train_stream, valid_stream, test_stream = _fineweb_streams(
                 seed=seed,
                 shuffle_buffer=args.shuffle_buffer,
-                valid_docs=args.fineweb_valid_docs,
-                test_docs=args.fineweb_test_docs,
+                valid_size=args.valid_size,
+                test_size=args.test_size,
+                tokenizer=tokenizer,
+                text_key=text_key,
+                test_seq_len=int(args.test_seq_len),
             )
-            prot_train_stream = None
-            prot_valid_stream = None
-            prot_test_stream = None
-            tokenizer = nl_tokenizer
+            phase_name = "nl"
         else:
-            nl_train_stream = None
-            nl_valid_stream = None
-            nl_test_stream = None
-            prot_train_stream, prot_valid_stream, prot_test_stream = _protein_streams(
+            train_stream, valid_stream, test_stream = _protein_streams(
                 seed=seed,
                 shuffle_buffer=args.shuffle_buffer,
+                valid_size=args.valid_size,
+                test_size=args.test_size,
+                tokenizer=tokenizer,
+                text_key=text_key,
+                test_seq_len=int(args.test_seq_len),
             )
-            tokenizer = prot_tokenizer
+            phase_name = "protein"
+
+        train_loader = _build_loader(
+            dataset=train_stream,
+            tokenizer=tokenizer,
+            seq_len=int(args.train_seq_len),
+            batch_size=int(args.batch_size),
+            text_key=text_key,
+            repeat=True,
+            mlm_probability=float(args.mlm_prob),
+        )
+        valid_loader = _build_loader(
+            dataset=valid_stream,
+            tokenizer=tokenizer,
+            seq_len=int(args.train_seq_len),
+            batch_size=int(args.batch_size),
+            text_key=text_key,
+            repeat=False,
+            mlm_probability=float(args.mlm_prob),
+        )
+        test_loader = _build_loader(
+            dataset=test_stream,
+            tokenizer=tokenizer,
+            seq_len=int(args.test_seq_len),
+            batch_size=int(args.batch_size),
+            text_key=text_key,
+            repeat=False,
+            mlm_probability=float(args.mlm_prob),
+        )
 
         for attention_type in attention_types:
             for positional_mode, drop_step in conditions:
                 run_idx += 1
 
                 head_size = 128 if attention_type == "dual_triangle" else 64
-                if head_size > args.d_model:
-                    head_size = args.d_model
+                if head_size > args.hidden_size:
+                    head_size = args.hidden_size
 
                 model_cfg = TransformerConfig(
                     vocab_size=int(len(tokenizer)),
                     seq_len=int(args.test_seq_len),
-                    d_model=int(args.d_model),
+                    hidden_size=int(args.hidden_size),
                     n_layers=int(args.n_layers),
                     head_size=int(head_size),
-                    d_ff=4 * int(args.d_model),
+                    intermediate_size=4 * int(args.hidden_size),
                     dropout=float(args.dropout),
                     attention_type=attention_type,
                     positional_mode=positional_mode,
                 )
                 model = init_mlm_model(model_cfg=model_cfg, seed=seed, device=device, compile_model=bool(args.compile))
-
-                if args.dataset == "nl":
-                    train_loader = _build_loader(
-                        dataset=nl_train_stream,
-                        tokenizer=nl_tokenizer,
-                        seq_len=int(args.train_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.fineweb_text_key,
-                        repeat=True,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    valid_loader = _build_loader(
-                        dataset=nl_valid_stream,
-                        tokenizer=nl_tokenizer,
-                        seq_len=int(args.train_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.fineweb_text_key,
-                        repeat=False,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    test_loader = _build_loader(
-                        dataset=nl_test_stream,
-                        tokenizer=nl_tokenizer,
-                        seq_len=int(args.test_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.fineweb_text_key,
-                        repeat=False,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    phase_name = "nl"
-                else:
-                    train_loader = _build_loader(
-                        dataset=prot_train_stream,
-                        tokenizer=prot_tokenizer,
-                        seq_len=int(args.train_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.prot_text_key,
-                        repeat=True,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    valid_loader = _build_loader(
-                        dataset=prot_valid_stream,
-                        tokenizer=prot_tokenizer,
-                        seq_len=int(args.train_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.prot_text_key,
-                        repeat=False,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    test_loader = _build_loader(
-                        dataset=prot_test_stream,
-                        tokenizer=prot_tokenizer,
-                        seq_len=int(args.test_seq_len),
-                        batch_size=int(args.batch_size),
-                        text_key=args.prot_text_key,
-                        repeat=False,
-                        mlm_probability=float(args.mlm_prob),
-                    )
-                    phase_name = "protein"
 
                 print(
                     f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
@@ -290,7 +358,7 @@ def main() -> None:
                     "attention_type": attention_type,
                     "positional_mode": positional_mode,
                     "drop_positions_step": -1 if drop_step < 0 else int(drop_step),
-                    "d_model": int(args.d_model),
+                    "hidden_size": int(args.hidden_size),
                     "n_layers": int(args.n_layers),
                     "head_size": int(head_size),
                     "train_seq_len": int(args.train_seq_len),
@@ -301,6 +369,10 @@ def main() -> None:
                         {
                             "nl_best_eval_idx": summary["best_eval_idx"],
                             "nl_best_eval_acc": summary["best_eval_acc"],
+                            "nl_best_valid_loss": summary["best_eval_loss"],
+                            "nl_best_valid_acc": summary["best_eval_acc"],
+                            "nl_best_valid_f1": summary["best_eval_f1"],
+                            "nl_best_valid_mcc": summary["best_eval_mcc"],
                             "nl_test_loss": test_metrics["loss"],
                             "nl_test_acc": test_metrics["acc"],
                             "nl_test_f1": test_metrics["f1"],
@@ -312,6 +384,10 @@ def main() -> None:
                         {
                             "prot_best_eval_idx": summary["best_eval_idx"],
                             "prot_best_eval_acc": summary["best_eval_acc"],
+                            "prot_best_valid_loss": summary["best_eval_loss"],
+                            "prot_best_valid_acc": summary["best_eval_acc"],
+                            "prot_best_valid_f1": summary["best_eval_f1"],
+                            "prot_best_valid_mcc": summary["best_eval_mcc"],
                             "prot_test_loss": test_metrics["loss"],
                             "prot_test_acc": test_metrics["acc"],
                             "prot_test_f1": test_metrics["f1"],
@@ -326,7 +402,7 @@ def main() -> None:
                         row["attention_type"] = attention_type
                         row["positional_mode"] = positional_mode
                         row["drop_positions_step"] = -1 if drop_step < 0 else int(drop_step)
-                        row["d_model"] = int(args.d_model)
+                        row["hidden_size"] = int(args.hidden_size)
                         row["n_layers"] = int(args.n_layers)
                         row["head_size"] = int(head_size)
                         row["seed"] = seed
@@ -337,7 +413,7 @@ def main() -> None:
 
     pd.DataFrame(rows).to_csv(out_dir / "results.csv", index=False)
     pd.DataFrame(history_rows).to_csv(out_dir / "history.csv", index=False)
-    plot_all(results_csv=out_dir / "results.csv", history_csv=out_dir / "history.csv", out_dir=out_dir / "plots")
+    plot_all(results_csv=out_dir / "results.csv", history_csv=out_dir / "history.csv", out_dir=plots_dir)
     print(f"Done. Wrote {out_dir / 'results.csv'} and {out_dir / 'history.csv'}")
 
 

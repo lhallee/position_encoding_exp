@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-
 from pathlib import Path
 
 
@@ -120,7 +119,7 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
         plt.close(g.figure)
 
     # ----------------------------
-    # Figure 3: Final test performance (extended context)
+    # Figure 3: Final validation metrics (best eval)
     # ----------------------------
     if len(results_df) > 0:
         results_df["Attention"] = results_df["attention_type"].map(_pretty_attention)
@@ -130,17 +129,18 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
         ]
         results_df["Variant"] = results_df["Attention"] + " / " + results_df["Condition"]
 
-        rows = []
-        def _maybe_add(row: pd.Series, *, dataset: str, prefix: str) -> None:
+        valid_rows = []
+
+        def _maybe_add_valid(row: pd.Series, *, dataset: str, prefix: str) -> None:
             metric_map = {
-                "loss": f"{prefix}_test_loss",
-                "acc": f"{prefix}_test_acc",
-                "f1": f"{prefix}_test_f1",
-                "mcc": f"{prefix}_test_mcc",
+                "loss": f"{prefix}_best_valid_loss",
+                "acc": f"{prefix}_best_valid_acc",
+                "f1": f"{prefix}_best_valid_f1",
+                "mcc": f"{prefix}_best_valid_mcc",
             }
             for metric, col in metric_map.items():
                 if col in results_df.columns:
-                    rows.append(
+                    valid_rows.append(
                         {
                             "Variant": row["Variant"],
                             "dataset": dataset,
@@ -150,11 +150,59 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
                     )
 
         for _, row in results_df.iterrows():
-            _maybe_add(row, dataset="NL", prefix="nl")
-            _maybe_add(row, dataset="Protein", prefix="prot")
+            _maybe_add_valid(row, dataset="NL", prefix="nl")
+            _maybe_add_valid(row, dataset="Protein", prefix="prot")
 
-        if len(rows) > 0:
-            test_df = pd.DataFrame(rows)
+        if len(valid_rows) > 0:
+            valid_df = pd.DataFrame(valid_rows)
+            g = sns.catplot(
+                data=valid_df,
+                x="Variant",
+                y="value",
+                col="dataset",
+                row="metric",
+                kind="bar",
+                height=2.4,
+                aspect=1.6,
+                errorbar="sd",
+            )
+            g.set_axis_labels("", "Value")
+            for ax in g.axes.flatten():
+                ax.tick_params(axis="x", rotation=45)
+                sns.despine(ax=ax)
+            _savefig(g.figure, out_dir, "figure3_final_valid_metrics")
+            plt.close(g.figure)
+
+    # ----------------------------
+    # Figure 4: Final test performance (extended context)
+    # ----------------------------
+    if len(results_df) > 0:
+        test_rows = []
+
+        def _maybe_add_test(row: pd.Series, *, dataset: str, prefix: str) -> None:
+            metric_map = {
+                "loss": f"{prefix}_test_loss",
+                "acc": f"{prefix}_test_acc",
+                "f1": f"{prefix}_test_f1",
+                "mcc": f"{prefix}_test_mcc",
+            }
+            for metric, col in metric_map.items():
+                if col in results_df.columns:
+                    test_rows.append(
+                        {
+                            "Variant": row["Variant"],
+                            "dataset": dataset,
+                            "metric": metric,
+                            "value": row[col],
+                        }
+                    )
+
+        for _, row in results_df.iterrows():
+            _maybe_add_test(row, dataset="NL", prefix="nl")
+            _maybe_add_test(row, dataset="Protein", prefix="prot")
+
+        if len(test_rows) > 0:
+            test_df = pd.DataFrame(test_rows)
             g = sns.catplot(
                 data=test_df,
                 x="Variant",
@@ -170,5 +218,5 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
             for ax in g.axes.flatten():
                 ax.tick_params(axis="x", rotation=45)
                 sns.despine(ax=ax)
-            _savefig(g.figure, out_dir, "figure3_extended_context_test")
+            _savefig(g.figure, out_dir, "figure4_final_test_metrics")
             plt.close(g.figure)

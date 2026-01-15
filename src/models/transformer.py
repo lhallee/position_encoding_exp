@@ -15,10 +15,10 @@ Linear = partial(nn.Linear, bias=False)
 class TransformerConfig:
     vocab_size: int
     seq_len: int
-    d_model: int
+    hidden_size: int
     n_layers: int
     head_size: int
-    d_ff: int
+    intermediate_size: int
     dropout: float
     attention_type: str  # "causal" | "bidirectional" | "dual_triangle"
     positional_mode: str  # "none" | "learned_abs" | "rotary"
@@ -80,11 +80,11 @@ class RotaryPositionEmbedding(nn.Module):
 
 
 class SwiGLUMLP(nn.Module):
-    def __init__(self, *, d_model: int, d_ff: int, dropout: float) -> None:
+    def __init__(self, *, hidden_size: int, intermediate_size: int, dropout: float) -> None:
         super().__init__()
         # SwiGLU: (x W) split -> silu(a) * b -> proj
-        self.fc_in = Linear(d_model, 2 * d_ff)
-        self.fc_out = Linear(d_ff, d_model)
+        self.fc_in = Linear(hidden_size, 2 * intermediate_size)
+        self.fc_out = Linear(intermediate_size, hidden_size)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -97,22 +97,22 @@ class SwiGLUMLP(nn.Module):
 
 
 class MultiheadSelfAttention(nn.Module):
-    def __init__(self, *, d_model: int, head_size: int, dropout: float, attention_type: str) -> None:
+    def __init__(self, *, hidden_size: int, head_size: int, dropout: float, attention_type: str) -> None:
         super().__init__()
-        if d_model % head_size != 0:
-            raise ValueError(f"d_model={d_model} must be divisible by head_size={head_size}")
+        if hidden_size % head_size != 0:
+            raise ValueError(f"hidden_size={hidden_size} must be divisible by head_size={head_size}")
 
         if attention_type not in {"causal", "bidirectional"}:
             raise ValueError(f"attention_type must be causal|bidirectional, got {attention_type}")
 
-        self.d_model = d_model
-        self.n_heads = d_model // head_size
+        self.hidden_size = hidden_size
+        self.n_heads = hidden_size // head_size
         self.d_head = head_size
         self.attention_type = attention_type
         self.dropout = dropout
 
-        self.qkv = Linear(d_model, 3 * d_model)
-        self.proj = Linear(d_model, d_model)
+        self.qkv = Linear(hidden_size, 3 * hidden_size)
+        self.proj = Linear(hidden_size, hidden_size)
 
     def forward(
         self,
@@ -173,7 +173,7 @@ class MultiheadSelfAttention(nn.Module):
             )
 
         # (b, h, l, d_head) -> (b, l, d)
-        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, t, self.d_model)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, t, self.hidden_size)
         if attention_mask is not None:
             attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
         return self.proj(attn_out)
@@ -191,25 +191,25 @@ class DualTriangleAttention(nn.Module):
     def __init__(
         self,
         *,
-        d_model: int,
+        hidden_size: int,
         head_size: int,
         dropout: float,
     ) -> None:
         super().__init__()
-        if d_model % head_size != 0:
-            raise ValueError(f"d_model={d_model} must be divisible by head_size={head_size}")
+        if hidden_size % head_size != 0:
+            raise ValueError(f"hidden_size={hidden_size} must be divisible by head_size={head_size}")
 
         if head_size % 2 != 0:
             raise ValueError(f"head_size={head_size} must be even (required for dual triangle splitting)")
 
-        self.d_model = d_model
-        self.n_heads = d_model // head_size
+        self.hidden_size = hidden_size
+        self.n_heads = hidden_size // head_size
         self.d_head = head_size
         self.half_d = head_size // 2
         self.dropout = dropout
 
-        self.qkv = Linear(d_model, 3 * d_model)
-        self.proj = Linear(d_model, d_model)
+        self.qkv = Linear(hidden_size, 3 * hidden_size)
+        self.proj = Linear(hidden_size, hidden_size)
 
     def forward(
         self,
@@ -278,28 +278,28 @@ class DualTriangleAttention(nn.Module):
         attn_out = torch.matmul(attn_weights, v)  # (b, h, l, d_head)
 
         # Reshape back: (b, h, l, d_head) -> (b, l, d)
-        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
         if attention_mask is not None:
             attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
         return self.proj(attn_out)
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, *, d_model: int, head_size: int, d_ff: int, dropout: float, attention_type: str) -> None:
+    def __init__(self, *, hidden_size: int, head_size: int, intermediate_size: int, dropout: float, attention_type: str) -> None:
         super().__init__()
-        self.ln1 = nn.LayerNorm(d_model)
+        self.ln1 = nn.LayerNorm(hidden_size)
         if attention_type == "dual_triangle":
-            self.attn = DualTriangleAttention(d_model=d_model, head_size=head_size, dropout=dropout)
+            self.attn = DualTriangleAttention(hidden_size=hidden_size, head_size=head_size, dropout=dropout)
             self._attn_kind = "dual_triangle"
         else:
             self.attn = MultiheadSelfAttention(
-                d_model=d_model, head_size=head_size, dropout=dropout, attention_type=attention_type
+                hidden_size=hidden_size, head_size=head_size, dropout=dropout, attention_type=attention_type
             )
             self._attn_kind = "sdpa"
         self.drop1 = nn.Dropout(dropout)
 
-        self.ln2 = nn.LayerNorm(d_model)
-        self.mlp = SwiGLUMLP(d_model=d_model, d_ff=d_ff, dropout=dropout)
+        self.ln2 = nn.LayerNorm(hidden_size)
+        self.mlp = SwiGLUMLP(hidden_size=hidden_size, intermediate_size=intermediate_size, dropout=dropout)
         self.drop2 = nn.Dropout(dropout)
 
     def forward(
@@ -311,7 +311,12 @@ class TransformerBlock(nn.Module):
         attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         x = x + self.drop1(
-            self.attn(self.ln1(x), rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=attention_mask)
+            self.attn(
+                self.ln1(x),
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                attention_mask=attention_mask,
+            )
         )
         x = x + self.drop2(self.mlp(self.ln2(x)))
         return x
@@ -336,16 +341,16 @@ class PositionProbeTransformer(nn.Module):
             raise ValueError(f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}")
 
         self.cfg = cfg
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
 
         if cfg.positional_mode == "learned_abs":
-            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.d_model))
+            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.hidden_size))
             nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
         else:
             self.pos_emb = None
         if cfg.positional_mode == "rotary":
-            if cfg.d_model % cfg.head_size != 0:
-                raise ValueError(f"d_model={cfg.d_model} must be divisible by head_size={cfg.head_size}")
+            if cfg.hidden_size % cfg.head_size != 0:
+                raise ValueError(f"hidden_size={cfg.hidden_size} must be divisible by head_size={cfg.head_size}")
             if cfg.head_size % 2 != 0:
                 raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
             self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
@@ -356,19 +361,19 @@ class PositionProbeTransformer(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 TransformerBlock(
-                    d_model=cfg.d_model,
+                    hidden_size=cfg.hidden_size,
                     head_size=cfg.head_size,
-                    d_ff=cfg.d_ff,
+                    intermediate_size=cfg.intermediate_size,
                     dropout=cfg.dropout,
                     attention_type=cfg.attention_type,
                 )
                 for _ in range(cfg.n_layers)
             ]
         )
-        self.ln_f = nn.LayerNorm(cfg.d_model)
+        self.ln_f = nn.LayerNorm(cfg.hidden_size)
 
-        self.pool_score = Linear(cfg.d_model, 1)
-        self.classifier = Linear(cfg.d_model, cfg.seq_len)
+        self.pool_score = Linear(cfg.hidden_size, 1)
+        self.classifier = Linear(cfg.hidden_size, cfg.seq_len)
 
         self._positions_enabled = True
 
@@ -383,7 +388,7 @@ class PositionProbeTransformer(nn.Module):
             raise ValueError(f"Expected seq_len={self.cfg.seq_len}, got {x.shape[1]}")
 
         # Inputs are expected to be token IDs in [1, vocab_size] inclusive.
-        if torch._dynamo.is_compiling():
+        if torch.compiler.is_compiling():
             # Avoid graph breaks from Tensor.item() while still enforcing the invariant.
             torch._assert(torch.all(x >= 1), "Token IDs must be >= 1")
             torch._assert(
@@ -423,7 +428,7 @@ class PositionProbeTransformer(nn.Module):
 
 class TransformerLM(nn.Module):
     """
-    Decoder-only transformer that returns per-token logits for language modeling.
+    Transformer that returns per-token logits for language modeling.
 
     - Supports positional_mode: none | learned_abs | rotary
     - Supports attention_type: causal | bidirectional | dual_triangle
@@ -438,17 +443,17 @@ class TransformerLM(nn.Module):
             raise ValueError(f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}")
 
         self.cfg = cfg
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
 
         if cfg.positional_mode == "learned_abs":
-            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.d_model))
+            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.hidden_size))
             nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
         else:
             self.pos_emb = None
 
         if cfg.positional_mode == "rotary":
-            if cfg.d_model % cfg.head_size != 0:
-                raise ValueError(f"d_model={cfg.d_model} must be divisible by head_size={cfg.head_size}")
+            if cfg.hidden_size % cfg.head_size != 0:
+                raise ValueError(f"hidden_size={cfg.hidden_size} must be divisible by head_size={cfg.head_size}")
             if cfg.head_size % 2 != 0:
                 raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
             self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
@@ -459,18 +464,21 @@ class TransformerLM(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 TransformerBlock(
-                    d_model=cfg.d_model,
+                    hidden_size=cfg.hidden_size,
                     head_size=cfg.head_size,
-                    d_ff=cfg.d_ff,
+                    intermediate_size=cfg.intermediate_size,
                     dropout=cfg.dropout,
                     attention_type=cfg.attention_type,
                 )
                 for _ in range(cfg.n_layers)
             ]
         )
-        self.ln_f = nn.LayerNorm(cfg.d_model)
-        self.lm_head = Linear(cfg.d_model, cfg.vocab_size)
-
+        self.ln_f = nn.LayerNorm(cfg.hidden_size)
+        self.lm_head = nn.Sequential(
+            nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=True),
+            nn.GELU(),
+            nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=True),
+        )
         self._positions_enabled = True
 
     def set_positions_enabled(self, enabled: bool) -> None:

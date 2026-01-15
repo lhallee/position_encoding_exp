@@ -1,10 +1,9 @@
 import src.entrypoint_setup
 
 import argparse
-from pathlib import Path
-
 import pandas as pd
 import torch
+from pathlib import Path
 
 from src.experiment.plot_results import plot_all
 from src.experiment.train_one import TrainConfig, train_one
@@ -25,7 +24,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", type=int, nargs="+", default=[11, 22, 33], help="Random seeds.")
     parser.add_argument("--seq_len", type=int, default=64, help="Sequence length.")
     parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..vocab_size).")
-    parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of d_model values.")
+    parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of hidden_size values.")
     parser.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
     parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
@@ -69,7 +68,7 @@ def main() -> None:
 
     # Fixed modeling choices for simplicity:
     # - head_size is fixed (64 default, 128 for dual_triangle)
-    # - d_ff = 3 * d_model
+    # - intermediate_size = 3 * hidden_size
     d_models = sorted(list(args.d_models), reverse=True)
     n_layers_list = sorted(list(args.n_layers), reverse=True)
 
@@ -97,22 +96,22 @@ def main() -> None:
     for seed in args.seeds:
         for attention_type in attention_types:
             for positional_mode, drop_step in conditions:
-                for d_model in d_models:
+                for hidden_size in d_models:
                     for n_layers in n_layers_list:
                         run_idx += 1
 
                         # Use head_size instead of n_heads
                         head_size = 128 if attention_type == "dual_triangle" else 64
-                        if head_size > d_model:
-                            head_size = d_model
+                        if head_size > hidden_size:
+                            head_size = hidden_size
 
                         model_cfg = TransformerConfig(
                             vocab_size=args.vocab_size,
                             seq_len=args.seq_len,
-                            d_model=d_model,
+                            hidden_size=hidden_size,
                             n_layers=n_layers,
                             head_size=head_size,
-                            d_ff=3 * d_model,
+                            intermediate_size=3 * hidden_size,
                             dropout=float(args.dropout),
                             attention_type=attention_type,
                             positional_mode=positional_mode,
@@ -133,7 +132,7 @@ def main() -> None:
 
                         print(
                             f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
-                            f"drop={drop_step} layers={n_layers} d={d_model} device={device}"
+                            f"drop={drop_step} layers={n_layers} d={hidden_size} device={device}"
                         )
                         row = train_one(
                             model_cfg=model_cfg,
@@ -165,10 +164,10 @@ def main() -> None:
             model_cfg = TransformerConfig(
                 vocab_size=args.vocab_size,
                 seq_len=args.seq_len,
-                d_model=control_d_model,
+                hidden_size=control_d_model,
                 n_layers=control_n_layers,
                 head_size=head_size,
-                d_ff=4 * control_d_model,
+                intermediate_size=4 * control_d_model,
                 dropout=float(args.dropout),
                 attention_type=attention_type,
                 positional_mode="learned_abs",

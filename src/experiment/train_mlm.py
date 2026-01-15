@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import math
 import sys
-from dataclasses import dataclass
-from typing import Iterable, Iterator
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
+from typing import Iterable, Iterator
 from tqdm import trange
 
 from src.models.transformer import TransformerConfig, TransformerLM
@@ -167,6 +166,7 @@ def train_mlm_phase(
 
     best_metric = -1.0
     best_eval_idx = -1
+    best_metrics: dict[str, float] = {}
     bad_evals = 0
     global_step = start_global_step
 
@@ -256,6 +256,12 @@ def train_mlm_phase(
         if improved:
             best_metric = metrics["acc"]
             best_eval_idx = eval_idx
+            best_metrics = {
+                "loss": float(metrics["loss"]),
+                "acc": float(metrics["acc"]),
+                "f1": float(metrics["f1"]),
+                "mcc": float(metrics["mcc"]),
+            }
             bad_evals = 0
         else:
             bad_evals += 1
@@ -263,9 +269,25 @@ def train_mlm_phase(
         if bad_evals > train_cfg.patience:
             break
 
+    if "loss" in best_metrics:
+        best_eval_loss = float(best_metrics["loss"])
+    else:
+        best_eval_loss = float("nan")
+    if "f1" in best_metrics:
+        best_eval_f1 = float(best_metrics["f1"])
+    else:
+        best_eval_f1 = float("nan")
+    if "mcc" in best_metrics:
+        best_eval_mcc = float(best_metrics["mcc"])
+    else:
+        best_eval_mcc = float("nan")
+
     summary = {
         "best_eval_idx": best_eval_idx,
         "best_eval_acc": float(best_metric),
+        "best_eval_loss": best_eval_loss,
+        "best_eval_f1": best_eval_f1,
+        "best_eval_mcc": best_eval_mcc,
     }
 
     return summary, global_step

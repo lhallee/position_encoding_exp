@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
-
 from pathlib import Path
 
 
@@ -75,7 +74,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     # Note: `eval_acc` is the LAST eval accuracy from training (not best), by design.
     gdf = (
         df.groupby(
-            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "d_model"],
+            ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "hidden_size"],
             as_index=False,
         )["eval_acc"]
         .agg(["mean", "std"])
@@ -89,7 +88,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     ]
     gdf["Label mode"] = gdf["label_mode"].map({"true": "True labels", "random": "Random labels (control)"})
     gdf["Layers"] = gdf["n_layers"]
-    gdf["Hidden Size"] = gdf["d_model"]
+    gdf["Hidden Size"] = gdf["hidden_size"]
 
     chance = 1.0 / float(df["seq_len"].iloc[0])
 
@@ -193,8 +192,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     tdf_raw = df[df["label_mode"] == "true"].copy()
     if len(tdf_raw) > 0:
         max_layers = int(tdf_raw["n_layers"].max())
-        max_width = int(tdf_raw["d_model"].max())
-        sdf_raw = tdf_raw[(tdf_raw["n_layers"] == max_layers) & (tdf_raw["d_model"] == max_width)].copy()
+        max_width = int(tdf_raw["hidden_size"].max())
+        sdf_raw = tdf_raw[(tdf_raw["n_layers"] == max_layers) & (tdf_raw["hidden_size"] == max_width)].copy()
         if len(sdf_raw) > 0:
             sdf_raw["Attention"] = sdf_raw["attention_type"].map(_pretty_attention)
             sdf_raw["Condition"] = [
@@ -247,7 +246,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     if len(ndf) > 0:
         ndf["Attention"] = ndf["attention_type"].map(_pretty_attention)
         ndf["Layers"] = ndf["n_layers"]
-        ndf["Hidden Size"] = ndf["d_model"]
+        ndf["Hidden Size"] = ndf["hidden_size"]
 
         fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(13.2, 3.8), sharey=True, constrained_layout=True)
         layer_vals = sorted(ndf["Layers"].unique())

@@ -77,7 +77,7 @@ def compile_and_plot(out_dir_path: Path):
     
     config_cols = [
         "attention_type", "positional_mode", "drop_positions_step", 
-        "label_mode", "n_layers", "d_model", "head_size", "seed"
+        "label_mode", "n_layers", "hidden_size", "head_size", "seed"
     ]
     present_cols = [c for c in config_cols if c in combined_df.columns]
     
