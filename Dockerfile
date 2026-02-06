@@ -69,7 +69,6 @@ ENV PROJECT_ROOT=/workspace \
     HF_HOME=/workspace/.cache/huggingface \
     TORCH_HOME=/workspace/.cache/torch \
     XDG_CACHE_HOME=/workspace/.cache \
-    PYTHONPATH=/app:$PYTHONPATH
 
 RUN mkdir -p \
       /workspace/.cache/huggingface \
