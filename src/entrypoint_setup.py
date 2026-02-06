@@ -33,7 +33,18 @@ try:
     
     # Deterministic operations off for speed (set True if reproducibility needed)
     torch.backends.cudnn.deterministic = False
-    
+
+    import torch._inductor.config as inductor_config
+    inductor_config.max_autotune_gemm_backends = "ATEN,CUTLASS,FBGEMM"
+
+    try:
+        import torch._dynamo as dynamo
+        dynamo.config.capture_scalar_outputs = True
+    except Exception:
+        print("Failed to import torch._dynamo")
+
+    torch._dynamo.config.recompile_limit = 32
+
 except ImportError:
     pass
 

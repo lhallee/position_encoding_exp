@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Iterable, Iterator
-from tqdm import trange
+from tqdm import tqdm, trange
 
 from src.models.transformer import TransformerConfig, TransformerLM, TransformerLMUNet
 from src.training.optimizer import build_optimizer
@@ -45,6 +45,7 @@ def _eval_mlm(
     device: torch.device,
     data_iter: Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     eval_batches: int,
+    progress: bool = False,
 ) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
@@ -53,6 +54,7 @@ def _eval_mlm(
     all_preds: list[int] = []
     all_labels: list[int] = []
 
+    eval_bar = tqdm(total=eval_batches, desc="eval", leave=False, disable=not progress)
     eval_steps = 0
     attempts = 0
     max_attempts = eval_batches * 10
@@ -82,7 +84,9 @@ def _eval_mlm(
         total_count += masked_count
         all_preds.extend(preds[mask].flatten().tolist())
         all_labels.extend(labels[mask].flatten().tolist())
+        eval_bar.update(1)
 
+    eval_bar.close()
     assert total_count > 0, "No masked tokens in evaluation batches; cannot compute metrics."
 
     acc = float(total_correct) / float(total_count)
@@ -107,12 +111,14 @@ def eval_mlm(
     device: torch.device,
     loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
     eval_batches: int,
+    progress: bool = False,
 ) -> dict[str, float]:
     return _eval_mlm(
         model=model,
         device=device,
         data_iter=iter(loader),
         eval_batches=eval_batches,
+        progress=progress,
     )
 
 
@@ -277,6 +283,9 @@ def train_mlm_phase(
                 "loss": train_loss,
             })
 
+            if wandb_run is not None:
+                wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
+
             loss_sum = 0.0
             loss_count = 0
             wandb_loss_sum = 0.0
@@ -287,6 +296,7 @@ def train_mlm_phase(
                 device=device,
                 data_iter=iter(valid_loader),
                 eval_batches=train_cfg.eval_batches,
+                progress=progress,
             )
             history_rows.append({
                 "phase": phase_name,
@@ -321,11 +331,15 @@ def train_mlm_phase(
             "loss": train_loss,
         })
 
+        if wandb_run is not None:
+            wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
+
     last_metrics = _eval_mlm(
         model=model,
         device=device,
         data_iter=iter(valid_loader),
         eval_batches=train_cfg.eval_batches,
+        progress=progress,
     )
     history_rows.append({
         "phase": phase_name,

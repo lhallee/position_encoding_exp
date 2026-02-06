@@ -16,6 +16,7 @@ from src.plotting.plot_mlm import plot_all
 from src.training.train_mlm import MLMTrainConfig, eval_mlm, init_mlm_model, train_mlm_phase
 from src.models.transformer import TransformerConfig
 from src.data.mlm import StreamConfig, build_mlm_dataloader
+from src.data.tokenizer import build_nlp_tokenizer
 from src.utils.seed import set_global_seed
 
 
@@ -52,6 +53,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--valid_size", type=int, default=2000, help="Validation sample count.")
     parser.add_argument("--test_size", type=int, default=2000, help="Test sample count.")
+    parser.add_argument("--vocab_size", type=int, default=4096, help="BPE vocabulary size for NLP tokenizer (ignored for protein).")
     parser.add_argument("--fineweb_text_key", type=str, default="text", help="Text field in FineWeb-Edu.")
     parser.add_argument("--prot_text_key", type=str, default="sequence", help="Sequence field in omg_prot50.")
     parser.add_argument("--shuffle_buffer", type=int, default=10000, help="Streaming shuffle buffer size.")
@@ -194,7 +196,7 @@ def main() -> None:
     use_bfloat16 = not args.no_bfloat16
 
     if args.dataset == "nl":
-        tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
+        tokenizer = build_nlp_tokenizer(vocab_size=int(args.vocab_size), seed=0)
         text_key = args.fineweb_text_key
     else:
         tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
@@ -340,6 +342,7 @@ def main() -> None:
                     device=device,
                     loader=test_loader,
                     eval_batches=int(args.eval_batches),
+                    progress=show_progress,
                 )
 
                 if wandb_run is not None:
