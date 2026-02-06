@@ -16,7 +16,6 @@ from src.utils.seed import set_global_seed
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run position-probe sweeps (causal vs bidirectional, pos modes).")
     parser.add_argument("--out_dir", type=str, default="outputs", help="Output directory.")
-    parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
     parser.add_argument("--steps", type=int, default=256, help="Minibatches per evaluation (steps-per-eval).")
     parser.add_argument("--max_evals", type=int, default=10, help="Max #eval cycles before stopping.")
     parser.add_argument("--patience", type=int, default=3, help="Early stopping patience on eval accuracy.")
@@ -42,16 +41,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _device_from_arg(device_arg: str) -> torch.device:
-    if device_arg == "cpu":
-        return torch.device("cpu")
-    if device_arg == "cuda":
-        return torch.device("cuda")
-    if device_arg == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raise ValueError(f"device must be auto|cpu|cuda, got {device_arg}")
-
-
 def main() -> None:
     args = _parse_args()
     out_dir = Path(args.out_dir)
@@ -59,7 +48,7 @@ def main() -> None:
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    device = _device_from_arg(args.device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_global_seed(0)
 
     d_models = sorted(list(args.d_models), reverse=True)

@@ -77,7 +77,7 @@ class Muon(torch.optim.Optimizer):
 def build_optimizer(
     model: nn.Module,
     *,
-    muon_lr: float = 0.02,
+    muon_lr: float = 0.01,
     adam_lr: float = 1e-4,
     weight_decay: float = 0.01,
     momentum: float = 0.95,

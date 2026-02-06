@@ -16,21 +16,11 @@ from src.plotting.plot_argmax import plot_all
 
 
 COMMAND_ARGS = [
-    "--progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions none --out_dir group_1",
-    "--progress --d_models 512 1024 --n_layers 1 2 4 --conditions none --out_dir group_2",
-    "--progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions none --out_dir group_3",
-    "--progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs --out_dir group_4",
-    "--progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs --out_dir group_5",
-    "--progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs --out_dir group_6",
-    "--progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_7",
-    "--progress --d_models 512 1024 --n_layers 1 2 4 --conditions learned_abs_drop --out_dir group_8",
-    "--progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions learned_abs_drop --out_dir group_9",
-    "--progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary --out_dir group_10",
-    "--progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary --out_dir group_11",
-    "--progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary --out_dir group_12",
-    "--progress --d_models 4 16 64 256 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_13",
-    "--progress --d_models 512 1024 --n_layers 1 2 4 --conditions rotary_drop --out_dir group_14",
-    "--progress --d_models 4 16 64 256 512 1024 --n_layers 8 12 --conditions rotary_drop --out_dir group_15",
+    "--progress --d_models 4 64 768 --n_layers 1 4 12 --conditions none --out_dir group_1",
+    "--progress --d_models 4 64 768 --n_layers 1 4 12 --conditions learned_abs --out_dir group_2",
+    "--progress --d_models 4 64 768 --n_layers 1 4 12 --conditions learned_abs_drop --out_dir group_3",
+    "--progress --d_models 4 64 768 --n_layers 1 4 12 --conditions rotary --out_dir group_4",
+    "--progress --d_models 4 64 768 --n_layers 1 4 12 --conditions rotary_drop --out_dir group_5",
 ]
 
 
@@ -115,7 +105,6 @@ def main():
         cmd = (
             f"{py_cmd} -m src.training.sweep_argmax "
             "--out_dir outputs_bugfix_exp1 "
-            "--device cpu "
             "--steps 2 --max_evals 1 --patience 0 "
             "--batch_size 8 --eval_batches 1 "
             "--seeds 11 "

@@ -104,7 +104,7 @@ position_encoding_exp/
       transformer.py              # PositionProbeTransformer, TransformerLM, TransformerLMUNet
     training/
       train_argmax.py             # Training loop for Experiment 1
-      train_mlm.py                # Training loop for Experiment 2 (GradScaler, grad clip)
+      train_mlm.py                # Training loop for Experiment 2 (bfloat16, warmup+cooldown)
       optimizer.py                # Muon optimizer + build_optimizer() helper
       sweep_argmax.py             # Sweep runner for Experiment 1
       sweep_mlm.py                # Sweep runner for Experiment 2
@@ -148,9 +148,9 @@ py experiment_mlm_protein.py          # Full sweep
 ### Run individual sweeps directly
 
 ```bash
-py -m src.training.sweep_argmax --device cuda --amp --progress
-py -m src.training.sweep_mlm --dataset nl --device cuda --amp --progress
-py -m src.training.sweep_mlm --dataset protein --device cuda --amp --progress
+py -m src.training.sweep_argmax --amp --progress
+py -m src.training.sweep_mlm --dataset nl
+py -m src.training.sweep_mlm --dataset protein
 ```
 
 ### Generate attention visualizations
@@ -208,12 +208,12 @@ docker run --gpus all --shm-size=64g -v ${PWD}:/workspace pos_encoding_exp \
 ```bash
 docker run --gpus all --shm-size=64g -v ${PWD}:/workspace pos_encoding_exp \
     python -m src.training.sweep_mlm \
-    --dataset nl --device cuda --amp --progress \
+    --dataset nl \
     --hidden_size 768 --n_layers 12 --batch_size 128
 
 docker run --gpus all -v ${PWD}:/workspace pos_encoding_exp \
     python -m src.training.sweep_argmax \
-    --device cuda --amp --progress \
+    --amp --progress \
     --d_models 64 256 --n_layers 2 4
 ```
 
@@ -257,8 +257,8 @@ Block masks are compiled and cached per sequence length. For MLM training with p
 ### Throughput Optimizations
 
 - Compiled `flex_attention` via `torch.compile`
-- `torch.amp.GradScaler` for proper mixed-precision training
+- bfloat16 model casting (like SpeedrunningPLMs) -- no AMP autocast or GradScaler overhead
+- LR schedule: linear warmup -> constant -> cosine cooldown (default 1000/8000/1000 steps)
 - Multi-worker DataLoader with `pin_memory=True` and `persistent_workers=True`
 - GPU-side MLM masking to reduce CPU-GPU synchronization
 - TF32 tensor cores enabled for float32 matmul on Ampere+ GPUs
-- Gradient clipping for training stability

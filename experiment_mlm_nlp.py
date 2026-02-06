@@ -110,18 +110,17 @@ def main() -> None:
         run_experiment2_checks()
         py_cmd = _python_cmd()
         cmd = (
-            f"{py_cmd} -m src.training.sweep_mlm --progress "
+            f"{py_cmd} -m src.training.sweep_mlm "
             "--dataset nl "
             "--out_dir outputs_bugfix_exp2_nl "
-            "--device cpu "
-            "--steps 2 --max_evals 1 --patience 0 "
+            "--steps 4 --warmup_steps 1 --cooldown_steps 1 --eval_every 2 "
             "--batch_size 2 --eval_batches 1 "
             "--train_seq_len 16 --test_seq_len 32 "
             "--hidden_size 32 --n_layers 2 "
             "--seeds 11 "
             "--conditions none "
             "--valid_size 4 --test_size 4 --shuffle_buffer 100 "
-            "--no_unet "
+            "--no_unet --no_bfloat16 "
         )
         print(f"Bugfix command: {cmd}")
         subprocess.run(cmd, shell=True, check=True)

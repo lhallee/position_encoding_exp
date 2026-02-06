@@ -1,4 +1,9 @@
-"""Training loop for Experiment 2: masked language modeling."""
+"""Training loop for Experiment 2: masked language modeling.
+
+Uses bfloat16 model casting (like SpeedrunningPLMs) instead of AMP/GradScaler.
+LR schedule: linear warmup -> constant -> cosine cooldown.
+Always uses last model weights (no early stopping / patience).
+"""
 
 from __future__ import annotations
 
@@ -18,20 +23,19 @@ from src.utils.seed import set_global_seed
 
 @dataclass(frozen=True)
 class MLMTrainConfig:
-    steps_per_eval: int
-    max_evals: int
-    patience: int
+    total_steps: int
     warmup_steps: int
+    cooldown_steps: int
+    eval_every: int
     batch_size: int
     lr: float
     weight_decay: float
     eval_batches: int
     drop_positions_step: int | None
-    amp: bool
     mlm_probability: float
     use_unet: bool = True
-    grad_clip: float = 1.0
     muon_lr: float = 0.02
+    bfloat16: bool = True
 
 
 @torch.inference_mode()
@@ -41,10 +45,8 @@ def _eval_mlm(
     device: torch.device,
     data_iter: Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     eval_batches: int,
-    amp: bool,
 ) -> dict[str, float]:
     model.eval()
-    use_amp = bool(amp) and (device.type == "cuda")
     total_loss = 0.0
     total_correct = 0
     total_count = 0
@@ -61,21 +63,12 @@ def _eval_mlm(
         attention_mask = attention_mask.to(device)
         labels = labels.to(device)
 
-        if use_amp:
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                logits = model(input_ids, attention_mask=attention_mask)
-                loss = F.cross_entropy(
-                    logits.view(-1, logits.shape[-1]),
-                    labels.view(-1),
-                    ignore_index=-100,
-                )
-        else:
-            logits = model(input_ids, attention_mask=attention_mask)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.shape[-1]),
-                labels.view(-1),
-                ignore_index=-100,
-            )
+        logits = model(input_ids, attention_mask=attention_mask)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.shape[-1]),
+            labels.view(-1),
+            ignore_index=-100,
+        )
 
         preds = torch.argmax(logits, dim=-1)
         mask = labels != -100
@@ -114,14 +107,12 @@ def eval_mlm(
     device: torch.device,
     loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
     eval_batches: int,
-    amp: bool,
 ) -> dict[str, float]:
     return _eval_mlm(
         model=model,
         device=device,
         data_iter=iter(loader),
         eval_batches=eval_batches,
-        amp=amp,
     )
 
 
@@ -132,15 +123,45 @@ def init_mlm_model(
     device: torch.device,
     compile_model: bool,
     use_unet: bool = True,
+    bfloat16: bool = True,
 ) -> nn.Module:
     set_global_seed(seed)
     if use_unet:
         model = TransformerLMUNet(model_cfg).to(device)
     else:
         model = TransformerLM(model_cfg).to(device)
+
+    # Cast to bfloat16 like SpeedrunningPLMs (no AMP/GradScaler needed)
+    if bfloat16 and device.type == "cuda":
+        model = model.bfloat16()
+
     if compile_model and sys.platform.startswith("linux"):
         model = torch.compile(model)
     return model
+
+
+def _lr_schedule(
+    step: int,
+    *,
+    lr: float,
+    warmup_steps: int,
+    cooldown_steps: int,
+    total_steps: int,
+) -> float:
+    """Linear warmup -> constant -> cosine cooldown to 0."""
+    if step < warmup_steps:
+        # Linear warmup
+        return lr * (float(step + 1) / float(warmup_steps))
+
+    cooldown_start = total_steps - cooldown_steps
+    if step >= cooldown_start:
+        # Cosine cooldown from lr -> 0
+        progress = float(step - cooldown_start) / float(max(1, cooldown_steps))
+        progress = min(max(progress, 0.0), 1.0)
+        return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    # Constant LR in the middle
+    return lr
 
 
 def train_mlm_phase(
@@ -166,90 +187,110 @@ def train_mlm_phase(
     else:
         optimizers = [torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)]
 
-    total_steps = train_cfg.max_evals * train_cfg.steps_per_eval
-    assert total_steps > 0, f"total_steps must be > 0, got {total_steps}"
-    assert train_cfg.warmup_steps > 0, f"warmup_steps must be > 0, got {train_cfg.warmup_steps}"
+    assert train_cfg.total_steps > 0, f"total_steps must be > 0, got {train_cfg.total_steps}"
+    assert train_cfg.warmup_steps >= 0, f"warmup_steps must be >= 0, got {train_cfg.warmup_steps}"
+    assert train_cfg.cooldown_steps >= 0, f"cooldown_steps must be >= 0, got {train_cfg.cooldown_steps}"
+    assert train_cfg.warmup_steps + train_cfg.cooldown_steps <= train_cfg.total_steps, (
+        f"warmup ({train_cfg.warmup_steps}) + cooldown ({train_cfg.cooldown_steps}) "
+        f"exceeds total_steps ({train_cfg.total_steps})"
+    )
 
-    use_amp = bool(train_cfg.amp) and (device.type == "cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-
-    def _lr_at_step(step: int) -> float:
-        if step < train_cfg.warmup_steps:
-            return train_cfg.lr * (float(step + 1) / float(train_cfg.warmup_steps))
-        denom = float(max(1, total_steps - train_cfg.warmup_steps))
-        progress_val = float(step - train_cfg.warmup_steps) / denom
-        progress_val = min(max(progress_val, 0.0), 1.0)
-        return train_cfg.lr * 0.5 * (1.0 + math.cos(math.pi * progress_val))
-
-    best_metric = -1.0
-    best_eval_idx = -1
-    best_metrics: dict[str, float] = {}
-    bad_evals = 0
+    # Track last eval metrics (always use last model weights)
+    last_metrics: dict[str, float] = {}
     global_step = start_global_step
+    eval_idx = 0
 
-    for eval_idx in range(train_cfg.max_evals):
-        model.train()
-        epoch_bar = trange(
-            train_cfg.steps_per_eval,
-            disable=not progress,
-            desc=f"{phase_name} epoch {eval_idx + 1}/{train_cfg.max_evals}",
-            leave=False,
+    bar = trange(
+        train_cfg.total_steps,
+        disable=not progress,
+        desc=f"{phase_name}",
+        leave=False,
+    )
+    model.train()
+    loss_sum = 0.0
+    loss_count = 0
+
+    for step_in_phase in bar:
+        if train_cfg.drop_positions_step is not None:
+            if global_step == train_cfg.drop_positions_step:
+                model.set_positions_enabled(False)
+
+        lr = _lr_schedule(
+            step_in_phase,
+            lr=train_cfg.lr,
+            warmup_steps=train_cfg.warmup_steps,
+            cooldown_steps=train_cfg.cooldown_steps,
+            total_steps=train_cfg.total_steps,
         )
-        loss_sum = 0.0
-        for _ in epoch_bar:
-            if train_cfg.drop_positions_step is not None:
-                if global_step == train_cfg.drop_positions_step:
-                    model.set_positions_enabled(False)
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["lr"] = lr
 
-            lr = _lr_at_step(global_step)
-            for opt in optimizers:
-                for group in opt.param_groups:
-                    group["lr"] = lr
+        input_ids, attention_mask, labels = next(train_iter)
+        input_ids = input_ids.to(device, non_blocking=True)
+        attention_mask = attention_mask.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
-            input_ids, attention_mask, labels = next(train_iter)
-            input_ids = input_ids.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+        logits = model(input_ids, attention_mask=attention_mask)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.shape[-1]),
+            labels.view(-1),
+            ignore_index=-100,
+        )
 
-            if use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    logits = model(input_ids, attention_mask=attention_mask)
-                    loss = F.cross_entropy(
-                        logits.view(-1, logits.shape[-1]),
-                        labels.view(-1),
-                        ignore_index=-100,
-                    )
-            else:
-                logits = model(input_ids, attention_mask=attention_mask)
-                loss = F.cross_entropy(
-                    logits.view(-1, logits.shape[-1]),
-                    labels.view(-1),
-                    ignore_index=-100,
-                )
+        loss_val = float(loss.item())
+        loss_sum += loss_val
+        loss_count += 1
 
-            loss_val = float(loss.item())
-            loss_sum += loss_val
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
 
-            for opt in optimizers:
-                opt.zero_grad(set_to_none=True)
+        loss.backward()
 
-            scaler.scale(loss).backward()
+        for opt in optimizers:
+            opt.step()
 
-            # Gradient clipping
-            if train_cfg.grad_clip > 0:
-                for opt in optimizers:
-                    scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+        global_step += 1
 
-            for opt in optimizers:
-                scaler.step(opt)
-            scaler.update()
+        if progress and (step_in_phase % max(1, train_cfg.total_steps // 20) == 0):
+            avg_loss = loss_sum / max(1, loss_count)
+            bar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{lr:.2e}")
 
-            global_step += 1
-            if progress and (global_step % max(1, train_cfg.steps_per_eval // 4) == 0):
-                epoch_bar.set_postfix(loss=loss_val, lr=float(lr))
+        # Evaluate periodically
+        if train_cfg.eval_every > 0 and (step_in_phase + 1) % train_cfg.eval_every == 0:
+            train_loss = loss_sum / max(1, loss_count)
+            history_rows.append({
+                "phase": phase_name,
+                "split": "train",
+                "eval_idx": eval_idx,
+                "global_step": global_step,
+                "loss": train_loss,
+            })
+            loss_sum = 0.0
+            loss_count = 0
 
-        train_loss = loss_sum / float(train_cfg.steps_per_eval)
+            last_metrics = _eval_mlm(
+                model=model,
+                device=device,
+                data_iter=iter(valid_loader),
+                eval_batches=train_cfg.eval_batches,
+            )
+            history_rows.append({
+                "phase": phase_name,
+                "split": "valid",
+                "eval_idx": eval_idx,
+                "global_step": global_step,
+                "loss": last_metrics["loss"],
+                "acc": last_metrics["acc"],
+                "f1": last_metrics["f1"],
+                "mcc": last_metrics["mcc"],
+            })
+            eval_idx += 1
+            model.train()
+
+    # Final eval at end of training if we haven't just done one
+    if loss_count > 0:
+        train_loss = loss_sum / max(1, loss_count)
         history_rows.append({
             "phase": phase_name,
             "split": "train",
@@ -258,51 +299,30 @@ def train_mlm_phase(
             "loss": train_loss,
         })
 
-        metrics = _eval_mlm(
-            model=model,
-            device=device,
-            data_iter=iter(valid_loader),
-            eval_batches=train_cfg.eval_batches,
-            amp=train_cfg.amp,
-        )
-        history_rows.append({
-            "phase": phase_name,
-            "split": "valid",
-            "eval_idx": eval_idx,
-            "global_step": global_step,
-            "loss": metrics["loss"],
-            "acc": metrics["acc"],
-            "f1": metrics["f1"],
-            "mcc": metrics["mcc"],
-        })
+    last_metrics = _eval_mlm(
+        model=model,
+        device=device,
+        data_iter=iter(valid_loader),
+        eval_batches=train_cfg.eval_batches,
+    )
+    history_rows.append({
+        "phase": phase_name,
+        "split": "valid",
+        "eval_idx": eval_idx,
+        "global_step": global_step,
+        "loss": last_metrics["loss"],
+        "acc": last_metrics["acc"],
+        "f1": last_metrics["f1"],
+        "mcc": last_metrics["mcc"],
+    })
 
-        improved = metrics["acc"] > best_metric
-        if improved:
-            best_metric = metrics["acc"]
-            best_eval_idx = eval_idx
-            best_metrics = {
-                "loss": float(metrics["loss"]),
-                "acc": float(metrics["acc"]),
-                "f1": float(metrics["f1"]),
-                "mcc": float(metrics["mcc"]),
-            }
-            bad_evals = 0
-        else:
-            bad_evals += 1
-
-        if bad_evals > train_cfg.patience:
-            break
-
-    best_eval_loss = float(best_metrics["loss"]) if "loss" in best_metrics else float("nan")
-    best_eval_f1 = float(best_metrics["f1"]) if "f1" in best_metrics else float("nan")
-    best_eval_mcc = float(best_metrics["mcc"]) if "mcc" in best_metrics else float("nan")
-
+    # Always use last model weights
     summary = {
-        "best_eval_idx": best_eval_idx,
-        "best_eval_acc": float(best_metric),
-        "best_eval_loss": best_eval_loss,
-        "best_eval_f1": best_eval_f1,
-        "best_eval_mcc": best_eval_mcc,
+        "best_eval_idx": eval_idx,
+        "best_eval_acc": float(last_metrics["acc"]),
+        "best_eval_loss": float(last_metrics["loss"]),
+        "best_eval_f1": float(last_metrics["f1"]),
+        "best_eval_mcc": float(last_metrics["mcc"]),
     }
 
     return summary, global_step

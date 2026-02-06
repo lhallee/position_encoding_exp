@@ -22,27 +22,26 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MLM sweeps for Experiment 2.")
     parser.add_argument("--dataset", type=str, default="nl", choices=["nl", "protein"], help="Which dataset to run.")
     parser.add_argument("--out_dir", type=str, default="outputs_exp2", help="Output directory.")
-    parser.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda")
-    parser.add_argument("--compile", action="store_true", help="Enable torch.compile on Linux.")
-    parser.add_argument("--steps", type=int, default=1000, help="Minibatches per evaluation.")
-    parser.add_argument("--max_evals", type=int, default=10, help="Eval cycles.")
-    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience on eval accuracy.")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
+    parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile (compiled by default on Linux).")
+    parser.add_argument("--steps", type=int, default=10000, help="Total training steps.")
+    parser.add_argument("--warmup_steps", type=int, default=1000, help="LR linear warmup steps.")
+    parser.add_argument("--cooldown_steps", type=int, default=1000, help="LR cosine cooldown steps.")
+    parser.add_argument("--eval_every", type=int, default=1000, help="Evaluate every N training steps.")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
     parser.add_argument("--eval_batches", type=int, default=8, help="Evaluation batches.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[11], help="Random seeds.")
-    parser.add_argument("--train_seq_len", type=int, default=128, help="Training sequence length.")
-    parser.add_argument("--test_seq_len", type=int, default=512, help="Extended test sequence length.")
+    parser.add_argument("--train_seq_len", type=int, default=256, help="Training sequence length.")
+    parser.add_argument("--test_seq_len", type=int, default=1024, help="Extended test sequence length.")
     parser.add_argument("--hidden_size", type=int, default=768, help="Hidden size.")
     parser.add_argument("--n_layers", type=int, default=12, help="Number of layers (must be even for UNet).")
-    parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (Adam).")
-    parser.add_argument("--muon_lr", type=float, default=0.02, help="Learning rate (Muon).")
-    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--no_progress", action="store_true", help="Disable training progress bars (shown by default).")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (Adam).")
+    parser.add_argument("--muon_lr", type=float, default=0.01, help="Learning rate (Muon).")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout probability.")
-    parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
+    parser.add_argument("--no_bfloat16", action="store_true", help="Disable bfloat16 casting (enabled by default on CUDA).")
     parser.add_argument("--mlm_prob", type=float, default=0.15, help="Masked LM probability.")
     parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
-    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping max norm.")
     parser.add_argument("--no_unet", action="store_true", help="Use flat transformer instead of UNet.")
     parser.add_argument(
         "--conditions", type=str, nargs="+",
@@ -56,16 +55,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--prot_text_key", type=str, default="sequence", help="Sequence field in omg_prot50.")
     parser.add_argument("--shuffle_buffer", type=int, default=10000, help="Streaming shuffle buffer size.")
     return parser.parse_args()
-
-
-def _device_from_arg(device_arg: str) -> torch.device:
-    if device_arg == "cpu":
-        return torch.device("cpu")
-    if device_arg == "cuda":
-        return torch.device("cuda")
-    if device_arg == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    raise ValueError(f"device must be auto|cpu|cuda, got {device_arg}")
 
 
 def _select_text(sample: dict, text_key: str) -> str:
@@ -160,10 +149,13 @@ def main() -> None:
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    device = _device_from_arg(args.device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_global_seed(0)
 
     use_unet = not args.no_unet
+    compile_model = not args.no_compile
+    show_progress = not args.no_progress
+    use_bfloat16 = not args.no_bfloat16
 
     if args.dataset == "nl":
         tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
@@ -172,7 +164,7 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
         text_key = args.prot_text_key
 
-    drop_after = int(2 * args.steps)
+    drop_after = int(2 * args.eval_every)
     condition_map: dict[str, tuple[str, int]] = {
         "none": ("none", -1),
         "learned_abs": ("learned_abs", -1),
@@ -242,29 +234,29 @@ def main() -> None:
                 )
                 model = init_mlm_model(
                     model_cfg=model_cfg, seed=seed, device=device,
-                    compile_model=bool(args.compile), use_unet=use_unet,
+                    compile_model=compile_model, use_unet=use_unet,
+                    bfloat16=use_bfloat16,
                 )
 
                 print(
                     f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
-                    f"drop={drop_step} device={device} unet={use_unet}"
+                    f"drop={drop_step} device={device} unet={use_unet} bf16={use_bfloat16}"
                 )
 
                 train_cfg = MLMTrainConfig(
-                    steps_per_eval=int(args.steps),
-                    max_evals=int(args.max_evals),
-                    patience=int(args.patience),
-                    warmup_steps=int(args.steps),
+                    total_steps=int(args.steps),
+                    warmup_steps=int(args.warmup_steps),
+                    cooldown_steps=int(args.cooldown_steps),
+                    eval_every=int(args.eval_every),
                     batch_size=int(args.batch_size),
                     lr=float(args.lr),
                     weight_decay=float(args.weight_decay),
                     eval_batches=int(args.eval_batches),
                     drop_positions_step=None if drop_step < 0 else int(drop_step),
-                    amp=bool(args.amp),
                     mlm_probability=float(args.mlm_prob),
                     use_unet=use_unet,
-                    grad_clip=float(args.grad_clip),
                     muon_lr=float(args.muon_lr),
+                    bfloat16=use_bfloat16,
                 )
 
                 global_step = 0
@@ -274,7 +266,7 @@ def main() -> None:
                     device=device,
                     train_iter=iter(train_loader),
                     valid_loader=valid_loader,
-                    progress=args.progress,
+                    progress=show_progress,
                     phase_name=phase_name,
                     history_rows=history_rows,
                     start_global_step=global_step,
@@ -285,7 +277,6 @@ def main() -> None:
                     device=device,
                     loader=test_loader,
                     eval_batches=int(args.eval_batches),
-                    amp=bool(args.amp),
                 )
 
                 model.cpu()
