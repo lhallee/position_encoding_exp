@@ -4,6 +4,7 @@ import src.entrypoint_setup
 
 import argparse
 import itertools
+import os
 import pandas as pd
 import torch
 from pathlib import Path
@@ -54,6 +55,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fineweb_text_key", type=str, default="text", help="Text field in FineWeb-Edu.")
     parser.add_argument("--prot_text_key", type=str, default="sequence", help="Sequence field in omg_prot50.")
     parser.add_argument("--shuffle_buffer", type=int, default=10000, help="Streaming shuffle buffer size.")
+    parser.add_argument("--wandb_token", type=str, default=None, help="Weights & Biases API token. Enables wandb logging if provided and wandb is available.")
+    parser.add_argument("--wandb_project", type=str, default="pos-encoding-mlm", help="Weights & Biases project name.")
     return parser.parse_args()
 
 
@@ -142,12 +145,39 @@ def _build_loader(
     )
 
 
+def _init_wandb(args: argparse.Namespace) -> bool:
+    """Login to wandb if token is provided and wandb is available. Returns True if wandb is active."""
+    if args.wandb_token is None:
+        return False
+    assert os.environ["WANDB_AVAILABLE"] == "true", (
+        "--wandb_token was provided but wandb is not installed. Install with: pip install wandb"
+    )
+    import wandb
+    wandb.login(key=args.wandb_token)
+    return True
+
+
+def _start_wandb_run(*, project: str, config: dict, run_name: str):
+    """Create and return a new wandb run."""
+    import wandb
+    return wandb.init(project=project, config=config, name=run_name, reinit=True)
+
+
+def _finish_wandb_run(wandb_run, summary: dict) -> None:
+    """Log final summary metrics and finish the wandb run."""
+    for k, v in summary.items():
+        wandb_run.summary[k] = v
+    wandb_run.finish()
+
+
 def main() -> None:
     args = _parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    use_wandb = _init_wandb(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_global_seed(0)
@@ -243,6 +273,32 @@ def main() -> None:
                     f"drop={drop_step} device={device} unet={use_unet} bf16={use_bfloat16}"
                 )
 
+                wandb_run = None
+                if use_wandb:
+                    run_name = f"s{seed}_{attention_type}_{positional_mode}_drop{drop_step}"
+                    wandb_run = _start_wandb_run(
+                        project=args.wandb_project,
+                        config={
+                            "seed": seed, "dataset": args.dataset,
+                            "attention_type": attention_type,
+                            "positional_mode": positional_mode,
+                            "drop_positions_step": drop_step,
+                            "hidden_size": args.hidden_size,
+                            "n_layers": args.n_layers, "head_size": head_size,
+                            "train_seq_len": args.train_seq_len,
+                            "test_seq_len": args.test_seq_len,
+                            "use_unet": use_unet, "bfloat16": use_bfloat16,
+                            "total_steps": args.steps,
+                            "warmup_steps": args.warmup_steps,
+                            "cooldown_steps": args.cooldown_steps,
+                            "batch_size": args.batch_size,
+                            "lr": args.lr, "muon_lr": args.muon_lr,
+                            "weight_decay": args.weight_decay,
+                            "mlm_probability": args.mlm_prob,
+                        },
+                        run_name=run_name,
+                    )
+
                 train_cfg = MLMTrainConfig(
                     total_steps=int(args.steps),
                     warmup_steps=int(args.warmup_steps),
@@ -270,6 +326,7 @@ def main() -> None:
                     phase_name=phase_name,
                     history_rows=history_rows,
                     start_global_step=global_step,
+                    wandb_run=wandb_run,
                 )
 
                 test_metrics = eval_mlm(
@@ -278,6 +335,14 @@ def main() -> None:
                     loader=test_loader,
                     eval_batches=int(args.eval_batches),
                 )
+
+                if wandb_run is not None:
+                    wandb_run.log({
+                        "test/loss": test_metrics["loss"],
+                        "test/accuracy": test_metrics["acc"],
+                        "test/f1": test_metrics["f1"],
+                        "test/mcc": test_metrics["mcc"],
+                    }, step=global_step)
 
                 model.cpu()
                 del model
@@ -307,6 +372,9 @@ def main() -> None:
                     f"{prefix}_test_mcc": test_metrics["mcc"],
                 }
                 rows.append(row)
+
+                if wandb_run is not None:
+                    _finish_wandb_run(wandb_run, row)
 
                 for hr in history_rows:
                     if "attention_type" not in hr:

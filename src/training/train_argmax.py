@@ -80,6 +80,7 @@ def train_one(
     vocab_low_inclusive: int,
     vocab_high_inclusive: int,
     progress: bool,
+    wandb_run=None,
 ) -> dict[str, float | int | str]:
     set_global_seed(seed)
 
@@ -156,6 +157,9 @@ def train_one(
             opt.step()
             global_step += 1
 
+            if wandb_run is not None:
+                wandb_run.log({"train/loss": last_loss, "train/lr": float(lr)}, step=global_step)
+
             if progress and (global_step % max(1, train_cfg.steps_per_eval // 4) == 0):
                 epoch_bar.set_postfix(loss=last_loss, lr=float(lr))
 
@@ -171,6 +175,13 @@ def train_one(
             amp=train_cfg.amp,
         )
         last_acc = acc
+
+        if wandb_run is not None:
+            wandb_run.log({
+                "eval/accuracy": float(acc),
+                "eval/best_accuracy": float(best_acc) if acc <= best_acc else float(acc),
+                "eval/epoch": eval_idx,
+            }, step=global_step)
 
         improved = acc > best_acc
         if improved:

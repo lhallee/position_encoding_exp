@@ -3,6 +3,7 @@
 import src.entrypoint_setup
 
 import argparse
+import os
 import pandas as pd
 import torch
 from pathlib import Path
@@ -38,7 +39,34 @@ def _parse_args() -> argparse.Namespace:
         choices=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
         help="Which positional/Drop conditions to run.",
     )
+    parser.add_argument("--wandb_token", type=str, default=None, help="Weights & Biases API token. Enables wandb logging if provided and wandb is available.")
+    parser.add_argument("--wandb_project", type=str, default="pos-encoding-argmax", help="Weights & Biases project name.")
     return parser.parse_args()
+
+
+def _init_wandb(args: argparse.Namespace) -> bool:
+    """Login to wandb if token is provided and wandb is available. Returns True if wandb is active."""
+    if args.wandb_token is None:
+        return False
+    assert os.environ["WANDB_AVAILABLE"] == "true", (
+        "--wandb_token was provided but wandb is not installed. Install with: pip install wandb"
+    )
+    import wandb
+    wandb.login(key=args.wandb_token)
+    return True
+
+
+def _start_wandb_run(*, project: str, config: dict, run_name: str):
+    """Create and return a new wandb run."""
+    import wandb
+    return wandb.init(project=project, config=config, name=run_name, reinit=True)
+
+
+def _finish_wandb_run(wandb_run, summary: dict) -> None:
+    """Log final summary metrics and finish the wandb run."""
+    for k, v in summary.items():
+        wandb_run.summary[k] = v
+    wandb_run.finish()
 
 
 def main() -> None:
@@ -47,6 +75,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     plots_dir = out_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    use_wandb = _init_wandb(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_global_seed(0)
@@ -109,6 +139,25 @@ def main() -> None:
                             f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
                             f"drop={drop_step} layers={n_layers} d={hidden_size} device={device}"
                         )
+
+                        wandb_run = None
+                        if use_wandb:
+                            run_name = f"s{seed}_{attention_type}_{positional_mode}_drop{drop_step}_L{n_layers}_d{hidden_size}"
+                            wandb_run = _start_wandb_run(
+                                project=args.wandb_project,
+                                config={
+                                    "seed": seed, "attention_type": attention_type,
+                                    "positional_mode": positional_mode, "drop_positions_step": drop_step,
+                                    "n_layers": n_layers, "hidden_size": hidden_size,
+                                    "head_size": head_size, "seq_len": args.seq_len,
+                                    "vocab_size": args.vocab_size, "label_mode": "true",
+                                    "steps_per_eval": args.steps, "max_evals": args.max_evals,
+                                    "patience": args.patience, "batch_size": args.batch_size,
+                                    "lr": args.lr, "weight_decay": args.weight_decay,
+                                },
+                                run_name=run_name,
+                            )
+
                         row = train_one(
                             model_cfg=model_cfg,
                             train_cfg=train_cfg,
@@ -117,7 +166,12 @@ def main() -> None:
                             vocab_low_inclusive=1,
                             vocab_high_inclusive=args.vocab_size,
                             progress=args.progress,
+                            wandb_run=wandb_run,
                         )
+
+                        if wandb_run is not None:
+                            _finish_wandb_run(wandb_run, row)
+
                         print(f"  eval_acc={row['eval_acc']:.4f}")
                         rows.append(row)
 
@@ -162,6 +216,25 @@ def main() -> None:
                 f"[control] seed={seed} attn={attention_type} pos=learned_abs drop=-1 "
                 f"layers={control_n_layers} d={control_d_model} device={device} label_mode=random"
             )
+
+            wandb_run = None
+            if use_wandb:
+                run_name = f"control_s{seed}_{attention_type}_random_L{control_n_layers}_d{control_d_model}"
+                wandb_run = _start_wandb_run(
+                    project=args.wandb_project,
+                    config={
+                        "seed": seed, "attention_type": attention_type,
+                        "positional_mode": "learned_abs", "drop_positions_step": -1,
+                        "n_layers": control_n_layers, "hidden_size": control_d_model,
+                        "head_size": head_size, "seq_len": args.seq_len,
+                        "vocab_size": args.vocab_size, "label_mode": "random",
+                        "steps_per_eval": args.steps, "max_evals": args.max_evals,
+                        "patience": args.patience, "batch_size": args.batch_size,
+                        "lr": args.lr, "weight_decay": args.weight_decay,
+                    },
+                    run_name=run_name,
+                )
+
             row = train_one(
                 model_cfg=model_cfg,
                 train_cfg=train_cfg,
@@ -170,7 +243,12 @@ def main() -> None:
                 vocab_low_inclusive=1,
                 vocab_high_inclusive=args.vocab_size,
                 progress=args.progress,
+                wandb_run=wandb_run,
             )
+
+            if wandb_run is not None:
+                _finish_wandb_run(wandb_run, row)
+
             print(f"  eval_acc={row['eval_acc']:.4f}")
             rows.append(row)
             if int(args.flush_every) > 0 and (len(rows) % int(args.flush_every) == 0):

@@ -29,13 +29,16 @@ def _python_cmd() -> str:
     return "py" if sys.platform.startswith("win") else "python"
 
 
-def _build_commands() -> list[str]:
+def _build_commands(wandb_token: str | None = None) -> list[str]:
     py_cmd = _python_cmd()
-    return [f"{py_cmd} -m src.training.sweep_mlm {args}" for args in COMMAND_ARGS]
+    wandb_args = ""
+    if wandb_token is not None:
+        wandb_args = f" --wandb_token {wandb_token} --wandb_project pos-encoding-mlm-protein"
+    return [f"{py_cmd} -m src.training.sweep_mlm {args}{wandb_args}" for args in COMMAND_ARGS]
 
 
-def run_experiments() -> None:
-    commands = _build_commands()
+def run_experiments(wandb_token: str | None = None) -> None:
+    commands = _build_commands(wandb_token=wandb_token)
     for i, cmd in enumerate(commands, 1):
         print(f"\n--- Running experiment {i}/{len(commands)} ---")
         print(f"Command: {cmd}")
@@ -103,6 +106,7 @@ def main() -> None:
     parser.add_argument("--out_dir", type=str, default="outputs_exp2_protein", help="Output directory.")
     parser.add_argument("--skip_runs", action="store_true", help="Skip running experiments and only compile/plot.")
     parser.add_argument("--bugfix", action="store_true", help="Run a cheap bugfix sweep with checks.")
+    parser.add_argument("--wandb_token", type=str, default=None, help="Weights & Biases API token. Enables wandb logging if provided.")
     args = parser.parse_args()
 
     if args.bugfix:
@@ -110,6 +114,9 @@ def main() -> None:
 
         run_experiment2_checks()
         py_cmd = _python_cmd()
+        wandb_args = ""
+        if args.wandb_token is not None:
+            wandb_args = f" --wandb_token {args.wandb_token} --wandb_project pos-encoding-mlm-protein"
         cmd = (
             f"{py_cmd} -m src.training.sweep_mlm "
             "--dataset protein "
@@ -122,11 +129,12 @@ def main() -> None:
             "--conditions none "
             "--valid_size 4 --test_size 4 --shuffle_buffer 100 "
             "--no_unet --no_bfloat16 "
+            f"{wandb_args}"
         )
         print(f"Bugfix command: {cmd}")
         subprocess.run(cmd, shell=True, check=True)
     elif not args.skip_runs:
-        run_experiments()
+        run_experiments(wandb_token=args.wandb_token)
     else:
         print("Skipping experiment execution as requested.")
 

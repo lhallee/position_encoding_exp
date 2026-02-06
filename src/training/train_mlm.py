@@ -175,6 +175,7 @@ def train_mlm_phase(
     phase_name: str,
     history_rows: list[dict[str, float | int | str]],
     start_global_step: int,
+    wandb_run=None,
 ) -> tuple[dict[str, float], int]:
     # Build optimizer: Muon+Adam for UNet, plain AdamW for flat transformer
     if train_cfg.use_unet:
@@ -266,6 +267,10 @@ def train_mlm_phase(
                 "global_step": global_step,
                 "loss": train_loss,
             })
+
+            if wandb_run is not None:
+                wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
+
             loss_sum = 0.0
             loss_count = 0
 
@@ -285,6 +290,15 @@ def train_mlm_phase(
                 "f1": last_metrics["f1"],
                 "mcc": last_metrics["mcc"],
             })
+
+            if wandb_run is not None:
+                wandb_run.log({
+                    "valid/loss": last_metrics["loss"],
+                    "valid/accuracy": last_metrics["acc"],
+                    "valid/f1": last_metrics["f1"],
+                    "valid/mcc": last_metrics["mcc"],
+                }, step=global_step)
+
             eval_idx += 1
             model.train()
 
@@ -298,6 +312,9 @@ def train_mlm_phase(
             "global_step": global_step,
             "loss": train_loss,
         })
+
+        if wandb_run is not None:
+            wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
 
     last_metrics = _eval_mlm(
         model=model,
@@ -315,6 +332,14 @@ def train_mlm_phase(
         "f1": last_metrics["f1"],
         "mcc": last_metrics["mcc"],
     })
+
+    if wandb_run is not None:
+        wandb_run.log({
+            "valid/loss": last_metrics["loss"],
+            "valid/accuracy": last_metrics["acc"],
+            "valid/f1": last_metrics["f1"],
+            "valid/mcc": last_metrics["mcc"],
+        }, step=global_step)
 
     # Always use last model weights
     summary = {
