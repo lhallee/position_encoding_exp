@@ -148,7 +148,7 @@ py experiment_mlm_protein.py          # Full sweep
 ### Run individual sweeps directly
 
 ```bash
-py -m src.training.sweep_argmax --amp --progress
+py -m src.training.sweep_argmax
 py -m src.training.sweep_mlm --dataset nl
 py -m src.training.sweep_mlm --dataset protein
 ```
@@ -213,7 +213,6 @@ docker run --gpus all --shm-size=64g -v ${PWD}:/workspace pos_encoding_exp \
 
 docker run --gpus all -v ${PWD}:/workspace pos_encoding_exp \
     python -m src.training.sweep_argmax \
-    --amp --progress \
     --d_models 64 256 --n_layers 2 4
 ```
 

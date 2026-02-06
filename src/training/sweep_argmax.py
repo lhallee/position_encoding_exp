@@ -27,11 +27,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab_size", type=int, default=64, help="Vocab size (token IDs 1..vocab_size).")
     parser.add_argument("--d_models", type=int, nargs="+", default=[32, 64, 128, 256], help="List of hidden_size values.")
     parser.add_argument("--n_layers", type=int, nargs="+", default=[1, 2, 4, 6], help="List of n_layers values.")
-    parser.add_argument("--progress", action="store_true", help="Show per-run training progress bars.")
+    parser.add_argument("--no_progress", action="store_true", help="Disable per-run training progress bars (shown by default).")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability (default: 0.0).")
-    parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
     parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
     parser.add_argument(
         "--conditions", type=str, nargs="+",
@@ -59,7 +58,7 @@ def _init_wandb(args: argparse.Namespace) -> bool:
 def _start_wandb_run(*, project: str, config: dict, run_name: str):
     """Create and return a new wandb run."""
     import wandb
-    return wandb.init(project=project, config=config, name=run_name, reinit=True)
+    return wandb.init(project=project, config=config, name=run_name, reinit="finish_previous")
 
 
 def _finish_wandb_run(wandb_run, summary: dict) -> None:
@@ -132,7 +131,6 @@ def main() -> None:
                             eval_batches=args.eval_batches,
                             drop_positions_step=None if drop_step < 0 else drop_step,
                             label_mode="true",
-                            amp=bool(args.amp),
                         )
 
                         print(
@@ -165,7 +163,7 @@ def main() -> None:
                             device=device,
                             vocab_low_inclusive=1,
                             vocab_high_inclusive=args.vocab_size,
-                            progress=args.progress,
+                            progress=not args.no_progress,
                             wandb_run=wandb_run,
                         )
 
@@ -210,7 +208,6 @@ def main() -> None:
                 eval_batches=args.eval_batches,
                 drop_positions_step=None,
                 label_mode="random",
-                amp=bool(args.amp),
             )
             print(
                 f"[control] seed={seed} attn={attention_type} pos=learned_abs drop=-1 "
@@ -242,7 +239,7 @@ def main() -> None:
                 device=device,
                 vocab_low_inclusive=1,
                 vocab_high_inclusive=args.vocab_size,
-                progress=args.progress,
+                progress=not args.no_progress,
                 wandb_run=wandb_run,
             )
 

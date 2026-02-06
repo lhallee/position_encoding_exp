@@ -26,7 +26,6 @@ class TrainConfig:
     eval_batches: int
     drop_positions_step: int | None
     label_mode: str  # "true" | "random"
-    amp: bool
 
 
 @torch.inference_mode()
@@ -40,12 +39,10 @@ def evaluate_accuracy(
     vocab_low_inclusive: int,
     vocab_high_inclusive: int,
     label_mode: str,
-    amp: bool,
 ) -> float:
     model.eval()
     correct = 0
     total = 0
-    use_amp = bool(amp) and (device.type == "cuda")
     for _ in range(eval_batches):
         x, y = sample_batch_argmax_position(
             batch_size=batch_size,
@@ -60,11 +57,8 @@ def evaluate_accuracy(
             pass
         else:
             raise ValueError(f"label_mode must be true|random, got {label_mode}")
-        if use_amp:
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
-                logits = model(x)
-        else:
-            logits = model(x)
+        
+        logits = model(x)
         pred = torch.argmax(logits, dim=1)
         correct += int(torch.sum(pred == y).item())
         total += int(y.numel())
@@ -112,7 +106,6 @@ def train_one(
     global_step = 0
     for eval_idx in range(train_cfg.max_evals):
         model.train()
-        use_amp = bool(train_cfg.amp) and (device.type == "cuda")
         epoch_bar = trange(
             train_cfg.steps_per_eval,
             disable=not progress,
@@ -143,13 +136,8 @@ def train_one(
             else:
                 raise ValueError(f"label_mode must be true|random, got {train_cfg.label_mode}")
 
-            if use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    logits = model(x)
-                    loss = loss_fn(logits, y)
-            else:
-                logits = model(x)
-                loss = loss_fn(logits, y)
+            logits = model(x)
+            loss = loss_fn(logits, y)
             last_loss = float(loss.item())
 
             opt.zero_grad(set_to_none=True)
@@ -172,7 +160,6 @@ def train_one(
             vocab_low_inclusive=vocab_low_inclusive,
             vocab_high_inclusive=vocab_high_inclusive,
             label_mode=train_cfg.label_mode,
-            amp=train_cfg.amp,
         )
         last_acc = acc
 
@@ -235,7 +222,6 @@ def train_one(
         "lr": train_cfg.lr,
         "weight_decay": train_cfg.weight_decay,
         "eval_batches": train_cfg.eval_batches,
-        "amp": int(bool(train_cfg.amp)),
         "eval_acc": float(last_acc),
         "best_eval_acc": float(best_acc),
     }

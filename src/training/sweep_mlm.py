@@ -160,7 +160,7 @@ def _init_wandb(args: argparse.Namespace) -> bool:
 def _start_wandb_run(*, project: str, config: dict, run_name: str):
     """Create and return a new wandb run."""
     import wandb
-    return wandb.init(project=project, config=config, name=run_name, reinit=True)
+    return wandb.init(project=project, config=config, name=run_name, reinit="finish_previous")
 
 
 def _finish_wandb_run(wandb_run, summary: dict) -> None:

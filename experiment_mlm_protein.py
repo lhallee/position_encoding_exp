@@ -17,11 +17,11 @@ from src.plotting.plot_mlm import plot_all
 
 
 COMMAND_ARGS = [
-    "--progress --dataset protein --conditions none --out_dir group_protein_1",
-    "--progress --dataset protein --conditions learned_abs --out_dir group_protein_2",
-    "--progress --dataset protein --conditions learned_abs_drop --out_dir group_protein_3",
-    "--progress --dataset protein --conditions rotary --out_dir group_protein_4",
-    "--progress --dataset protein --conditions rotary_drop --out_dir group_protein_5",
+    "--dataset protein --conditions none --out_dir group_protein_1",
+    "--dataset protein --conditions learned_abs --out_dir group_protein_2",
+    "--dataset protein --conditions learned_abs_drop --out_dir group_protein_3",
+    "--dataset protein --conditions rotary --out_dir group_protein_4",
+    "--dataset protein --conditions rotary_drop --out_dir group_protein_5",
 ]
 
 

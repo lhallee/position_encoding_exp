@@ -16,11 +16,11 @@ from src.plotting.plot_mlm import plot_all
 
 
 COMMAND_ARGS = [
-    "--progress --dataset nl --conditions none --out_dir group_nl_1",
-    "--progress --dataset nl --conditions learned_abs --out_dir group_nl_2",
-    "--progress --dataset nl --conditions learned_abs_drop --out_dir group_nl_3",
-    "--progress --dataset nl --conditions rotary --out_dir group_nl_4",
-    "--progress --dataset nl --conditions rotary_drop --out_dir group_nl_5",
+    "--dataset nl --conditions none --out_dir group_nl_1",
+    "--dataset nl --conditions learned_abs --out_dir group_nl_2",
+    "--dataset nl --conditions learned_abs_drop --out_dir group_nl_3",
+    "--dataset nl --conditions rotary --out_dir group_nl_4",
+    "--dataset nl --conditions rotary_drop --out_dir group_nl_5",
 ]
 
 
