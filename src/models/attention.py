@@ -8,8 +8,11 @@ Provides three attention types:
                  flex_attention call with a block_mask)
 """
 
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 from torch.nn.attention.flex_attention import (
     flex_attention,
@@ -22,6 +25,29 @@ from src.models.components import Linear, apply_rope
 
 # Compiled flex_attention for use in forward passes
 _compiled_flex_attention = torch.compile(flex_attention)
+
+# flex_attention (torch inductor) requires head dim >= this value
+_FLEX_HEAD_DIM_MIN = 16
+
+
+def _pad_to_min_head_dim(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Zero-pad the head dimension of Q, K, V to _FLEX_HEAD_DIM_MIN.
+
+    This preserves attention semantics because:
+    - Zero-padded Q/K dims contribute 0 to dot-product scores.
+    - Zero-padded V dims produce 0 in the output.
+    The caller must pass scale=1/sqrt(original_d) and slice the output back.
+    """
+    pad_amount = _FLEX_HEAD_DIM_MIN - q.shape[-1]
+    assert pad_amount > 0, "No padding needed"
+    q = F.pad(q, (0, pad_amount))
+    k = F.pad(k, (0, pad_amount))
+    v = F.pad(v, (0, pad_amount))
+    return q, k, v
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +201,21 @@ class FlexSelfAttention(nn.Module):
             q = apply_rope(q, rope_cos, rope_sin)
             k = apply_rope(k, rope_cos, rope_sin)
 
-        attn_out = _compiled_flex_attention(
-            q, k, v,
-            block_mask=block_mask,
-        )
+        need_pad = self.d_head < _FLEX_HEAD_DIM_MIN
+        if need_pad:
+            original_d = self.d_head
+            q, k, v = _pad_to_min_head_dim(q, k, v)
+            attn_out = _compiled_flex_attention(
+                q, k, v,
+                block_mask=block_mask,
+                scale=1.0 / math.sqrt(original_d),
+            )
+            attn_out = attn_out[..., :original_d]
+        else:
+            attn_out = _compiled_flex_attention(
+                q, k, v,
+                block_mask=block_mask,
+            )
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, t, self.hidden_size)
         return self.proj(attn_out)
@@ -248,10 +285,21 @@ class DualTriangleFlexAttention(nn.Module):
         v = v.permute(0, 1, 3, 2, 4).reshape(bsz, self.n_actual_heads, seq_len, self.half_d)
 
         # Single flex_attention call; block_mask routes heads to upper/lower triangles
-        attn_out = _compiled_flex_attention(
-            q, k, v,
-            block_mask=block_mask,
-        )
+        need_pad = self.half_d < _FLEX_HEAD_DIM_MIN
+        if need_pad:
+            original_half_d = self.half_d
+            q, k, v = _pad_to_min_head_dim(q, k, v)
+            attn_out = _compiled_flex_attention(
+                q, k, v,
+                block_mask=block_mask,
+                scale=1.0 / math.sqrt(original_half_d),
+            )
+            attn_out = attn_out[..., :original_half_d]
+        else:
+            attn_out = _compiled_flex_attention(
+                q, k, v,
+                block_mask=block_mask,
+            )
 
         # Reshape back: (B, 2*n_logical, L, half_d) -> (B, n_logical, L, d_head) -> (B, L, hidden)
         attn_out = attn_out.view(bsz, self.n_logical_heads, 2, seq_len, self.half_d)

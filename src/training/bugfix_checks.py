@@ -24,17 +24,16 @@ def run_experiment1_checks() -> None:
     assert torch.cuda.is_available(), "CUDA is required for bugfix checks (flex_attention needs GPU)"
     device = torch.device("cuda")
 
-    # Test all attention types
-    # flex_attention requires head dim >= 16; dual_triangle splits in half so needs >= 32
+    # Test all attention types (small head dims exercise the padding fallback path)
     for attn_type in ["bidirectional", "causal", "dual_triangle"]:
-        head_size = 32 if attn_type == "dual_triangle" else 16
+        head_size = 16 if attn_type == "dual_triangle" else 8
         cfg = TransformerConfig(
             vocab_size=32,
             seq_len=8,
-            hidden_size=32,
+            hidden_size=16,
             n_layers=1,
             head_size=head_size,
-            intermediate_size=64,
+            intermediate_size=32,
             dropout=0.0,
             attention_type=attn_type,
             positional_mode="learned_abs",
@@ -85,13 +84,12 @@ def run_experiment2_checks() -> None:
     assert not torch.any(labels[pad_positions] != -100), "Labels at padded positions must be -100"
 
     # Test flat TransformerLM
-    # flex_attention requires head dim >= 16
     lm_cfg = TransformerConfig(
         vocab_size=len(tokenizer),
         seq_len=cfg.seq_len,
         hidden_size=32,
         n_layers=2,
-        head_size=16,
+        head_size=8,
         intermediate_size=64,
         dropout=0.0,
         attention_type="bidirectional",
@@ -110,7 +108,7 @@ def run_experiment2_checks() -> None:
         seq_len=cfg.seq_len,
         hidden_size=32,
         n_layers=2,
-        head_size=16,
+        head_size=8,
         intermediate_size=64,
         dropout=0.0,
         attention_type="bidirectional",
@@ -123,13 +121,13 @@ def run_experiment2_checks() -> None:
     )
     print("  TransformerLMUNet: OK")
 
-    # Test dual triangle attention (head dim split in half, so need >= 32)
+    # Test dual triangle attention
     dt_cfg = TransformerConfig(
         vocab_size=len(tokenizer),
         seq_len=cfg.seq_len,
         hidden_size=32,
         n_layers=2,
-        head_size=32,
+        head_size=16,
         intermediate_size=64,
         dropout=0.0,
         attention_type="dual_triangle",
