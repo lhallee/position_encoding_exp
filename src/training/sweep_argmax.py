@@ -1,3 +1,5 @@
+"""Sweep runner for Experiment 1: argmax position probe."""
+
 import src.entrypoint_setup
 
 import argparse
@@ -5,11 +7,10 @@ import pandas as pd
 import torch
 from pathlib import Path
 
-from src.experiment.plot_results import plot_all
-from src.experiment.train_one import TrainConfig, train_one
+from src.plotting.plot_argmax import plot_all
+from src.training.train_argmax import TrainConfig, train_one
 from src.models.transformer import TransformerConfig
 from src.utils.seed import set_global_seed
-
 
 
 def _parse_args() -> argparse.Namespace:
@@ -33,15 +34,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action="store_true", help="Use mixed precision on CUDA (speed).")
     parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
     parser.add_argument(
-        "--conditions",
-        type=str,
-        nargs="+",
+        "--conditions", type=str, nargs="+",
         default=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
         choices=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
-        help=(
-            "Which positional/Drop conditions to run. "
-            "Options: none, learned_abs, learned_abs_drop, rotary, rotary_drop."
-        ),
+        help="Which positional/Drop conditions to run.",
     )
     return parser.parse_args()
 
@@ -66,19 +62,10 @@ def main() -> None:
     device = _device_from_arg(args.device)
     set_global_seed(0)
 
-    # Fixed modeling choices for simplicity:
-    # - head_size is fixed (64 default, 128 for dual_triangle)
-    # - intermediate_size = 3 * hidden_size
     d_models = sorted(list(args.d_models), reverse=True)
     n_layers_list = sorted(list(args.n_layers), reverse=True)
 
-    # Conditions:
-    # - positional_mode=none (no PE ever)
-    # - positional_mode=learned_abs (PE always)
-    # - positional_mode=learned_abs + drop_positions_step (DroPE-like)
-    # - positional_mode=rotary (RoPE applied inside attention)
-    # - positional_mode=rotary + drop_positions_step (drop RoPE after eval #2)
-    drop_after = int(2 * args.steps)  # drop after the 2nd evaluation
+    drop_after = int(2 * args.steps)
     condition_map: dict[str, tuple[str, int]] = {
         "none": ("none", -1),
         "learned_abs": ("learned_abs", -1),
@@ -100,7 +87,6 @@ def main() -> None:
                     for n_layers in n_layers_list:
                         run_idx += 1
 
-                        # Use head_size instead of n_heads
                         head_size = 128 if attention_type == "dual_triangle" else 64
                         if head_size > hidden_size:
                             head_size = hidden_size
@@ -150,13 +136,11 @@ def main() -> None:
                             df = pd.DataFrame(rows)
                             df.to_csv(out_dir / "results.csv", index=False)
 
-    # Controls: random labels (i.e., "shuffled dataset labels") on the largest model config.
-    # We run len(seeds) controls for each attention type, last.
+    # Controls: random labels
     control_d_model = max(d_models)
     control_n_layers = max(n_layers_list)
     for seed in args.seeds:
         for attention_type in attention_types:
-            # Use head_size instead of n_heads
             head_size = 128 if attention_type == "dual_triangle" else 64
             if head_size > control_d_model:
                 head_size = control_d_model
@@ -213,4 +197,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

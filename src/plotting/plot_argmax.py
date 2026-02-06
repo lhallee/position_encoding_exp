@@ -1,3 +1,5 @@
+"""Plotting for Experiment 1: argmax position probe results."""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -6,7 +8,6 @@ from pathlib import Path
 
 
 def _style() -> None:
-    # Publication-ish defaults (works well for both PNG and PDF)
     sns.set_theme(style="ticks", context="paper", font="DejaVu Sans")
     plt.rcParams["figure.dpi"] = 200
     plt.rcParams["savefig.dpi"] = 300
@@ -46,11 +47,6 @@ def _pretty_condition(positional_mode: str, drop_positions_step: int) -> str:
 
 
 def _group_stats(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
-    """
-    Compute mean/std/n and a normal-approx 95% CI half-width for eval_acc.
-
-    Note: with small #seeds, this is an approximation (z=1.96).
-    """
     g = df.groupby(group_cols, as_index=False)["eval_acc"].agg(["mean", "std", "count"]).reset_index()
     g = g.rename(columns={"mean": "acc_mean", "std": "acc_std", "count": "n"})
     g["acc_std"] = g["acc_std"].fillna(0.0)
@@ -70,8 +66,6 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
 
     df = pd.read_csv(results_csv)
 
-    # Aggregate over seeds: mean and std for error reporting.
-    # Note: `eval_acc` is the LAST eval accuracy from training (not best), by design.
     gdf = (
         df.groupby(
             ["attention_type", "positional_mode", "drop_positions_step", "label_mode", "n_layers", "hidden_size"],
@@ -92,9 +86,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
 
     chance = 1.0 / float(df["seq_len"].iloc[0])
 
-    # ----------------------------
     # Figure 1: Heatmap grid (true labels)
-    # ----------------------------
     hdf = gdf[gdf["label_mode"] == "true"].copy()
     conditions = ["None", "Absolute", "DroPE", "RoPE", "RoPE off"]
     attention_order = ["Bidirectional", "DualTriangle", "Causal"]
@@ -108,7 +100,6 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         constrained_layout=True,
     )
 
-    # Use chance as the lower bound for better contrast while keeping a shared scale.
     vmin, vmax = chance, 1.0
     last_hm = None
     for r, attn in enumerate(attention_order):
@@ -124,20 +115,10 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 continue
 
             pivot = sdf.pivot(index="Layers", columns="Hidden Size", values="eval_acc_mean")
-
             last_hm = sns.heatmap(
-                pivot,
-                ax=ax,
-                vmin=vmin,
-                vmax=vmax,
-                cmap="viridis",
-                cbar=False,
-                annot=True,
-                fmt=".2f",
-                annot_kws={"fontsize": 8},
-                linewidths=0.6,
-                linecolor="white",
-                square=True,
+                pivot, ax=ax, vmin=vmin, vmax=vmax, cmap="viridis", cbar=False,
+                annot=True, fmt=".2f", annot_kws={"fontsize": 8},
+                linewidths=0.6, linecolor="white", square=True,
             )
             if c == 0:
                 ax.set_ylabel(f"{attn}\n\nLayers")
@@ -148,7 +129,6 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
             ax.tick_params(axis="y", rotation=0)
             sns.despine(ax=ax, left=False, bottom=False)
 
-    # Shared colorbar
     if last_hm is not None:
         cbar = fig.colorbar(last_hm.collections[0], ax=axes, shrink=0.85, pad=0.02)
         cbar.set_label("Accuracy (mean over seeds)")
@@ -156,9 +136,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
     _savefig(fig, out_dir, "figure1_heatmap_grid")
     plt.close(fig)
 
-    # ----------------------------
     # Figure 2: Control (random labels) vs chance
-    # ----------------------------
     cdf_raw = df[df["label_mode"] == "random"].copy()
     if len(cdf_raw) > 0:
         fig, ax = plt.subplots(figsize=(6.4, 3.6), constrained_layout=True)
@@ -167,14 +145,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         x = np.arange(len(stats))
         ax.bar(x, stats["acc_mean"], color=sns.color_palette("colorblind", n_colors=1)[0])
         ax.errorbar(
-            x,
-            stats["acc_mean"],
-            yerr=stats["acc_ci95"],
-            fmt="none",
-            ecolor="black",
-            elinewidth=1.2,
-            capsize=4,
-            capthick=1.2,
+            x, stats["acc_mean"], yerr=stats["acc_ci95"],
+            fmt="none", ecolor="black", elinewidth=1.2, capsize=4, capthick=1.2,
         )
         ax.set_xticks(x, stats["Attention"].tolist())
         ax.axhline(chance, color="black", linestyle="--", linewidth=1.2)
@@ -186,9 +158,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
         _savefig(fig, out_dir, "figure2_control_random_labels")
         plt.close(fig)
 
-    # ----------------------------
     # Figure 3: Summary bars at the largest model (true labels)
-    # ----------------------------
     tdf_raw = df[df["label_mode"] == "true"].copy()
     if len(tdf_raw) > 0:
         max_layers = int(tdf_raw["n_layers"].max())
@@ -220,14 +190,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 xs = base_x + (j - (n_cond - 1) / 2) * width
                 ax.bar(xs, sub["acc_mean"], width=width, label=cond, color=palette[j])
                 ax.errorbar(
-                    xs,
-                    sub["acc_mean"],
-                    yerr=sub["acc_ci95"],
-                    fmt="none",
-                    ecolor="black",
-                    elinewidth=1.0,
-                    capsize=3,
-                    capthick=1.0,
+                    xs, sub["acc_mean"], yerr=sub["acc_ci95"],
+                    fmt="none", ecolor="black", elinewidth=1.0, capsize=3, capthick=1.0,
                 )
 
             ax.set_xticks(base_x, attn_vals)
@@ -239,9 +203,7 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
             _savefig(fig, out_dir, "figure3_largest_model_comparison")
             plt.close(fig)
 
-    # ----------------------------
     # Figure 4: Key hypothesis view (no positional embeddings)
-    # ----------------------------
     ndf = df[(df["label_mode"] == "true") & (df["positional_mode"] == "none")].copy()
     if len(ndf) > 0:
         ndf["Attention"] = ndf["attention_type"].map(_pretty_attention)
@@ -260,14 +222,8 @@ def plot_all(*, results_csv: Path, out_dir: Path) -> None:
                 sub = stats[stats["Layers"] == layer]
                 ax.plot(sub["Hidden Size"], sub["acc_mean"], marker="o", color=color, linewidth=1.8, label=str(layer))
                 ax.errorbar(
-                    sub["Hidden Size"],
-                    sub["acc_mean"],
-                    yerr=sub["acc_ci95"],
-                    fmt="none",
-                    ecolor=color,
-                    elinewidth=1.2,
-                    capsize=3,
-                    capthick=1.0,
+                    sub["Hidden Size"], sub["acc_mean"], yerr=sub["acc_ci95"],
+                    fmt="none", ecolor=color, elinewidth=1.2, capsize=3, capthick=1.0,
                 )
             ax.axhline(chance, color="black", linestyle="--", linewidth=1.0)
             ax.set_xlabel("Hidden Size")

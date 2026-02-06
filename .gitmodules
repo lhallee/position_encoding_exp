@@ -1,0 +1,3 @@
+[submodule "SpeedrunningPLMs"]
+	path = SpeedrunningPLMs
+	url = https://github.com/Gleghorn-Lab/SpeedrunningPLMs.git

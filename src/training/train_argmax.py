@@ -1,3 +1,5 @@
+"""Training loop for Experiment 1: argmax position probe."""
+
 import src.entrypoint_setup
 
 import math
@@ -8,7 +10,7 @@ from tqdm import trange
 from dataclasses import dataclass
 
 from src.models.transformer import PositionProbeTransformer, TransformerConfig
-from src.tasks.argmax_position import sample_batch_argmax_position
+from src.data.argmax import sample_batch_argmax_position
 from src.utils.seed import set_global_seed
 
 
@@ -22,9 +24,9 @@ class TrainConfig:
     lr: float
     weight_decay: float
     eval_batches: int
-    drop_positions_step: int | None  # if set, disable positions at this step and keep training
+    drop_positions_step: int | None
     label_mode: str  # "true" | "random"
-    amp: bool  # mixed precision on CUDA (speed), may slightly change numerics
+    amp: bool
 
 
 @torch.inference_mode()
@@ -83,7 +85,6 @@ def train_one(
 
     model = PositionProbeTransformer(model_cfg).to(device)
 
-    # Linux-only compilation (requirement). Windows can be slower/less reliable with compile.
     if sys.platform.startswith("linux"):
         model = torch.compile(model)
 
@@ -91,21 +92,16 @@ def train_one(
     loss_fn = nn.CrossEntropyLoss()
 
     total_steps = train_cfg.max_evals * train_cfg.steps_per_eval
-    if total_steps <= 0:
-        raise ValueError(f"total_steps must be > 0, got {total_steps}")
-    if train_cfg.warmup_steps <= 0:
-        raise ValueError(f"warmup_steps must be > 0, got {train_cfg.warmup_steps}")
+    assert total_steps > 0, f"total_steps must be > 0, got {total_steps}"
+    assert train_cfg.warmup_steps > 0, f"warmup_steps must be > 0, got {train_cfg.warmup_steps}"
 
     def _lr_at_step(step: int) -> float:
-        # Warmup: 0 -> lr over warmup_steps
         if step < train_cfg.warmup_steps:
             return train_cfg.lr * (float(step + 1) / float(train_cfg.warmup_steps))
-
-        # Cosine decay from lr -> 0 over the remaining steps
         denom = float(max(1, total_steps - train_cfg.warmup_steps))
-        progress = float(step - train_cfg.warmup_steps) / denom
-        progress = min(max(progress, 0.0), 1.0)
-        return train_cfg.lr * 0.5 * (1.0 + math.cos(math.pi * progress))
+        progress_val = float(step - train_cfg.warmup_steps) / denom
+        progress_val = min(max(progress_val, 0.0), 1.0)
+        return train_cfg.lr * 0.5 * (1.0 + math.cos(math.pi * progress_val))
 
     best_acc = -1.0
     best_eval_idx = -1
@@ -184,9 +180,6 @@ def train_one(
         else:
             bad_evals += 1
 
-        # If we ever hit perfect accuracy, stop immediately and report that score.
-        # (Accuracy is computed from integer counts, so >= 1.0 is safe.)
-        # Do NOT do this for DroPE runs: they may "grok" then degrade after dropping positions.
         if train_cfg.drop_positions_step is None and acc >= 1.0:
             best_acc = 1.0
             best_eval_idx = eval_idx
@@ -194,12 +187,17 @@ def train_one(
             break
 
         if progress:
-            epoch_bar.set_postfix(loss=last_loss, lr=float(_lr_at_step(max(0, global_step - 1))), acc=float(acc), best=float(best_acc), bad=bad_evals)
+            epoch_bar.set_postfix(
+                loss=last_loss,
+                lr=float(_lr_at_step(max(0, global_step - 1))),
+                acc=float(acc),
+                best=float(best_acc),
+                bad=bad_evals,
+            )
 
         if bad_evals > train_cfg.patience:
             break
 
-    # Clear model from memory
     model.cpu()
     del model
     torch.cuda.empty_cache()
@@ -227,8 +225,6 @@ def train_one(
         "weight_decay": train_cfg.weight_decay,
         "eval_batches": train_cfg.eval_batches,
         "amp": int(bool(train_cfg.amp)),
-        # Report last eval accuracy (especially important when stopping due to patience).
         "eval_acc": float(last_acc),
         "best_eval_acc": float(best_acc),
     }
-

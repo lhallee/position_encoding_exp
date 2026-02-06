@@ -25,4 +25,3 @@ def sample_batch_argmax_position(
     )
     y = torch.argmax(x, dim=1)
     return x, y
-

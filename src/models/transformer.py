@@ -1,14 +1,23 @@
+"""Transformer models: PositionProbeTransformer, TransformerLM, TransformerLMUNet."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch._dynamo
-
-from functools import partial
 from dataclasses import dataclass
 from typing import Optional
 
-
-Linear = partial(nn.Linear, bias=False)
+from src.models.components import (
+    Linear,
+    RotaryPositionEmbedding,
+    SwiGLUMLP,
+    apply_rope,
+)
+from src.models.attention import (
+    FlexSelfAttention,
+    DualTriangleFlexAttention,
+    build_block_mask,
+)
 
 
 @dataclass(frozen=True)
@@ -24,303 +33,98 @@ class TransformerConfig:
     positional_mode: str  # "none" | "learned_abs" | "rotary"
 
 
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    # x: (..., d) where d is even; rotate pairs (x0,x1)->(-x1,x0)
-    x_even = x[..., ::2]
-    x_odd = x[..., 1::2]
-    out = torch.stack((-x_odd, x_even), dim=-1)
-    return out.flatten(-2)
+# ---------------------------------------------------------------------------
+# Transformer Block
+# ---------------------------------------------------------------------------
 
-
-def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    # x: (b, h, t, d_rot), cos/sin: (1, 1, t, d_rot)
-    return (x * cos) + (_rotate_half(x) * sin)
-
-
-class RotaryPositionEmbedding(nn.Module):
-    def __init__(self, *, seq_len: int, d_rot: int, base: float = 10000.0) -> None:
-        super().__init__()
-        if d_rot % 2 != 0:
-            raise ValueError(f"d_rot must be even, got {d_rot}")
-        if seq_len <= 0:
-            raise ValueError(f"seq_len must be > 0, got {seq_len}")
-        self.seq_len = seq_len
-        self.d_rot = d_rot
-        self.base = float(base)
-
-        # Buffers are initialized on CPU; we re-cast/move on demand in forward().
-        self.register_buffer("cos_cached", torch.empty(1, 1, 0, d_rot), persistent=False)
-        self.register_buffer("sin_cached", torch.empty(1, 1, 0, d_rot), persistent=False)
-        self.register_buffer("_cache_device", torch.tensor(0, dtype=torch.int32), persistent=False)
-        self.register_buffer("_cache_dtype", torch.tensor(0, dtype=torch.int32), persistent=False)
-
-    def _build_cache(self, *, device: torch.device, dtype: torch.dtype) -> None:
-        # We compute cos/sin in float32 for stability then cast to dtype.
-        inv_freq = 1.0 / (
-            self.base ** (torch.arange(0, self.d_rot, 2, device=device, dtype=torch.float32) / float(self.d_rot))
-        )  # (d_rot/2,)
-        pos = torch.arange(self.seq_len, device=device, dtype=torch.float32)  # (t,)
-        freqs = torch.outer(pos, inv_freq)  # (t, d_rot/2)
-        cos = torch.cos(freqs)
-        sin = torch.sin(freqs)
-        cos = cos.repeat_interleave(2, dim=-1)  # (t, d_rot)
-        sin = sin.repeat_interleave(2, dim=-1)  # (t, d_rot)
-        self.cos_cached = cos.unsqueeze(0).unsqueeze(0).to(dtype=dtype)  # (1,1,t,d_rot)
-        self.sin_cached = sin.unsqueeze(0).unsqueeze(0).to(dtype=dtype)  # (1,1,t,d_rot)
-
-    def forward(self, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.cos_cached.shape[2] != self.seq_len:
-            self._build_cache(device=device, dtype=dtype)
-            return self.cos_cached, self.sin_cached
-
-        # If device/dtype mismatch, rebuild. (Simple + explicit; avoids .get() / hasattr() patterns.)
-        if self.cos_cached.device != device or self.cos_cached.dtype != dtype:
-            self._build_cache(device=device, dtype=dtype)
-        return self.cos_cached, self.sin_cached
-
-
-class SwiGLUMLP(nn.Module):
-    def __init__(self, *, hidden_size: int, intermediate_size: int, dropout: float) -> None:
-        super().__init__()
-        # SwiGLU: (x W) split -> silu(a) * b -> proj
-        self.fc_in = Linear(hidden_size, 2 * intermediate_size)
-        self.fc_out = Linear(intermediate_size, hidden_size)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc_in(x)
-        a, b = torch.chunk(x, 2, dim=-1)
-        x = F.silu(a) * b
-        x = self.dropout(x)
-        x = self.fc_out(x)
-        return x
-
-
-class MultiheadSelfAttention(nn.Module):
-    def __init__(self, *, hidden_size: int, head_size: int, dropout: float, attention_type: str) -> None:
-        super().__init__()
-        if hidden_size % head_size != 0:
-            raise ValueError(f"hidden_size={hidden_size} must be divisible by head_size={head_size}")
-
-        if attention_type not in {"causal", "bidirectional"}:
-            raise ValueError(f"attention_type must be causal|bidirectional, got {attention_type}")
-
-        self.hidden_size = hidden_size
-        self.n_heads = hidden_size // head_size
-        self.d_head = head_size
-        self.attention_type = attention_type
-        self.dropout = dropout
-
-        self.qkv = Linear(hidden_size, 3 * hidden_size)
-        self.proj = Linear(hidden_size, hidden_size)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        rope_cos: Optional[torch.Tensor],
-        rope_sin: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        # x: (b, l, d)
-        bsz, t, _ = x.shape
-        qkv = self.qkv(x)  # (b, l, 3d)
-        q, k, v = torch.chunk(qkv, 3, dim=-1)
-
-        # (b, l, h, d_head) -> (b, h, l, d_head)
-        q = q.view(bsz, t, self.n_heads, self.d_head).transpose(1, 2)
-        k = k.view(bsz, t, self.n_heads, self.d_head).transpose(1, 2)
-        v = v.view(bsz, t, self.n_heads, self.d_head).transpose(1, 2)
-
-        if rope_cos is not None:
-            if rope_sin is None:
-                raise ValueError("rope_sin must be provided when rope_cos is provided")
-            if self.d_head % 2 != 0:
-                raise ValueError(f"RoPE requires even d_head, got d_head={self.d_head}")
-            q = _apply_rope(q, rope_cos, rope_sin)
-            k = _apply_rope(k, rope_cos, rope_sin)
-
-        attn_mask = None
-        if attention_mask is not None:
-            if attention_mask.ndim != 2:
-                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
-            mask = attention_mask.bool()
-            key_keep = mask[:, None, None, :]  # (b, 1, 1, t)
-            if self.attention_type == "causal":
-                causal = torch.tril(torch.ones(t, t, dtype=torch.bool, device=x.device))
-                allowed = causal[None, None, :, :] & key_keep
-                attn_mask = torch.where(
-                    allowed,
-                    torch.zeros_like(allowed, dtype=x.dtype),
-                    torch.full_like(allowed, float("-inf"), dtype=x.dtype),
-                )
-            else:
-                attn_mask = torch.where(
-                    key_keep,
-                    torch.zeros_like(key_keep, dtype=x.dtype),
-                    torch.full_like(key_keep, float("-inf"), dtype=x.dtype),
-                )
-
-        # scaled_dot_product_attention returns (b, h, l, d_head)
-        if self.attention_type == "causal":
-            is_causal = attn_mask is None
-            attn_out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=is_causal
-            )
-        else:
-            attn_out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False
-            )
-
-        # (b, h, l, d_head) -> (b, l, d)
-        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, t, self.hidden_size)
-        if attention_mask is not None:
-            attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
-        return self.proj(attn_out)
-
-
-class DualTriangleAttention(nn.Module):
-    """
-    Bidirectional attention with separate query-key subspaces for forward/backward directions.
-    
-    - Upper triangle (j > i): attending to FUTURE positions, uses q_up @ k_up^T
-    - Lower triangle (j <= i): attending to PAST/SELF positions, uses q_down @ k_down^T
-    
-    This allows the model to learn distinct representations for "looking ahead" vs "looking back".
-    """
+class TransformerBlock(nn.Module):
     def __init__(
         self,
         *,
         hidden_size: int,
         head_size: int,
+        intermediate_size: int,
         dropout: float,
+        attention_type: str,
+        unet: bool = False,
     ) -> None:
         super().__init__()
-        if hidden_size % head_size != 0:
-            raise ValueError(f"hidden_size={hidden_size} must be divisible by head_size={head_size}")
-
-        if head_size % 2 != 0:
-            raise ValueError(f"head_size={head_size} must be even (required for dual triangle splitting)")
-
-        self.hidden_size = hidden_size
-        self.n_heads = hidden_size // head_size
-        self.d_head = head_size
-        self.half_d = head_size // 2
-        self.dropout = dropout
-
-        self.qkv = Linear(hidden_size, 3 * hidden_size)
-        self.proj = Linear(hidden_size, hidden_size)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        rope_cos: Optional[torch.Tensor],
-        rope_sin: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        bsz, seq_len, _ = x.shape
-
-        # Project to Q, K, V and reshape for multi-head attention
-        qkv = self.qkv(x)  # (b, l, 3d)
-        q, k, v = torch.chunk(qkv, 3, dim=-1)
-
-        # Reshape: (b, l, d) -> (b, h, l, d_head)
-        q = q.view(bsz, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        k = k.view(bsz, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        v = v.view(bsz, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-
-        if rope_cos is not None:
-            if rope_sin is None:
-                raise ValueError("rope_sin must be provided when rope_cos is provided")
-            if self.d_head % 2 != 0:
-                raise ValueError(f"RoPE requires even d_head, got d_head={self.d_head}")
-            q = _apply_rope(q, rope_cos, rope_sin)
-            k = _apply_rope(k, rope_cos, rope_sin)
-
-        # Split q and k into halves for upper/lower triangle attention
-        # q_up/k_up: for attending to future (j > i)
-        # q_down/k_down: for attending to past and self (j <= i)
-        q_up, q_down = q[..., : self.half_d], q[..., self.half_d :]
-        k_up, k_down = k[..., : self.half_d], k[..., self.half_d :]
-
-        # Compute attention logits for both directions
-        # Scale by sqrt(half_d) since each subspace has half the dimensions
-        scale = self.half_d**-0.5
-        attn_up = torch.matmul(q_up, k_up.transpose(-2, -1)) * scale  # (b, h, l, l)
-        attn_down = torch.matmul(q_down, k_down.transpose(-2, -1)) * scale  # (b, h, l, l)
-
-        # Create lower triangle mask (including diagonal): True where j <= i
-        lower_mask = torch.tril(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device)
-        )
-
-        # Combine: lower triangle (past/self) uses attn_down, upper triangle (future) uses attn_up
-        attn_logits = torch.where(lower_mask, attn_down, attn_up)
-
-        key_mask = None
-        if attention_mask is not None:
-            if attention_mask.ndim != 2:
-                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
-            key_mask = attention_mask.bool()[:, None, None, :]
-            attn_logits = attn_logits.masked_fill(~key_mask, float("-inf"))
-            key_any = key_mask.any(dim=-1, keepdim=True)
-            attn_logits = torch.where(key_any, attn_logits, torch.zeros_like(attn_logits))
-
-        # Softmax over keys dimension
-        attn_weights = F.softmax(attn_logits, dim=-1)
-
-        # Apply dropout during training
-        if self.training and self.dropout > 0:
-            attn_weights = F.dropout(attn_weights, p=self.dropout, training=True)
-
-        # Apply attention weights to values
-        attn_out = torch.matmul(attn_weights, v)  # (b, h, l, d_head)
-
-        # Reshape back: (b, h, l, d_head) -> (b, l, d)
-        attn_out = attn_out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
-        if attention_mask is not None:
-            attn_out = attn_out * attention_mask.bool().unsqueeze(-1)
-        return self.proj(attn_out)
-
-
-class TransformerBlock(nn.Module):
-    def __init__(self, *, hidden_size: int, head_size: int, intermediate_size: int, dropout: float, attention_type: str) -> None:
-        super().__init__()
         self.ln1 = nn.LayerNorm(hidden_size)
+        self.attention_type = attention_type
+        self.unet = unet
+
         if attention_type == "dual_triangle":
-            self.attn = DualTriangleAttention(hidden_size=hidden_size, head_size=head_size, dropout=dropout)
-            self._attn_kind = "dual_triangle"
-        else:
-            self.attn = MultiheadSelfAttention(
-                hidden_size=hidden_size, head_size=head_size, dropout=dropout, attention_type=attention_type
+            self.attn = DualTriangleFlexAttention(
+                hidden_size=hidden_size,
+                head_size=head_size,
             )
-            self._attn_kind = "sdpa"
+        else:
+            self.attn = FlexSelfAttention(
+                hidden_size=hidden_size,
+                head_size=head_size,
+                attention_type=attention_type,
+            )
         self.drop1 = nn.Dropout(dropout)
 
         self.ln2 = nn.LayerNorm(hidden_size)
         self.mlp = SwiGLUMLP(hidden_size=hidden_size, intermediate_size=intermediate_size, dropout=dropout)
         self.drop2 = nn.Dropout(dropout)
 
+        if unet:
+            # Lambda mixing for UNet: x = lambda[0]*x + lambda[1]*x0
+            self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
+            # Value embedding mixing in attention
+            self.v_lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
+
     def forward(
         self,
         x: torch.Tensor,
         *,
         rope_cos: Optional[torch.Tensor],
         rope_sin: Optional[torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
+        block_mask: object,
+        x0: Optional[torch.Tensor] = None,
+        vi: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.unet and x0 is not None:
+            x = self.lambdas[0] * x + self.lambdas[1] * x0
+
         x = x + self.drop1(
             self.attn(
                 self.ln1(x),
                 rope_cos=rope_cos,
                 rope_sin=rope_sin,
-                attention_mask=attention_mask,
+                block_mask=block_mask,
             )
         )
         x = x + self.drop2(self.mlp(self.ln2(x)))
         return x
 
+
+# ---------------------------------------------------------------------------
+# Value Embedding for UNet
+# ---------------------------------------------------------------------------
+
+class ValueEmbedding(nn.Module):
+    """Per-layer value embeddings that mirror encoder/decoder structure."""
+
+    def __init__(self, vocab_size: int, hidden_size: int, n_encoder_layers: int) -> None:
+        super().__init__()
+        self.embed = nn.ModuleList([
+            nn.Embedding(vocab_size, hidden_size)
+            for _ in range(n_encoder_layers)
+        ])
+
+    def forward(self, input_ids: torch.Tensor) -> list[torch.Tensor]:
+        """Returns list of value embeddings, mirrored for decoder."""
+        ve = [emb(input_ids) for emb in self.embed]
+        # Mirror for decoder: [...encoder_ve, ...reversed(encoder_ve)]
+        return ve + list(reversed(ve))
+
+
+# ---------------------------------------------------------------------------
+# Position Probe Transformer (Experiment 1)
+# ---------------------------------------------------------------------------
 
 class PositionProbeTransformer(nn.Module):
     """
@@ -335,10 +139,12 @@ class PositionProbeTransformer(nn.Module):
 
     def __init__(self, cfg: TransformerConfig) -> None:
         super().__init__()
-        if cfg.positional_mode not in {"none", "learned_abs", "rotary"}:
-            raise ValueError(f"positional_mode must be none|learned_abs|rotary, got {cfg.positional_mode}")
-        if cfg.attention_type not in {"causal", "bidirectional", "dual_triangle"}:
-            raise ValueError(f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}")
+        assert cfg.positional_mode in {"none", "learned_abs", "rotary"}, (
+            f"positional_mode must be none|learned_abs|rotary, got {cfg.positional_mode}"
+        )
+        assert cfg.attention_type in {"causal", "bidirectional", "dual_triangle"}, (
+            f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}"
+        )
 
         self.cfg = cfg
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
@@ -348,28 +154,27 @@ class PositionProbeTransformer(nn.Module):
             nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
         else:
             self.pos_emb = None
+
         if cfg.positional_mode == "rotary":
-            if cfg.hidden_size % cfg.head_size != 0:
-                raise ValueError(f"hidden_size={cfg.hidden_size} must be divisible by head_size={cfg.head_size}")
-            if cfg.head_size % 2 != 0:
-                raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
+            assert cfg.hidden_size % cfg.head_size == 0, (
+                f"hidden_size={cfg.hidden_size} must be divisible by head_size={cfg.head_size}"
+            )
+            assert cfg.head_size % 2 == 0, f"RoPE requires even head_size, got head_size={cfg.head_size}"
             self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
         else:
             self.rope = None
 
         self.drop_in = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(
-                    hidden_size=cfg.hidden_size,
-                    head_size=cfg.head_size,
-                    intermediate_size=cfg.intermediate_size,
-                    dropout=cfg.dropout,
-                    attention_type=cfg.attention_type,
-                )
-                for _ in range(cfg.n_layers)
-            ]
-        )
+        self.blocks = nn.ModuleList([
+            TransformerBlock(
+                hidden_size=cfg.hidden_size,
+                head_size=cfg.head_size,
+                intermediate_size=cfg.intermediate_size,
+                dropout=cfg.dropout,
+                attention_type=cfg.attention_type,
+            )
+            for _ in range(cfg.n_layers)
+        ])
         self.ln_f = nn.LayerNorm(cfg.hidden_size)
 
         self.pool_score = Linear(cfg.hidden_size, 1)
@@ -377,19 +182,37 @@ class PositionProbeTransformer(nn.Module):
 
         self._positions_enabled = True
 
+        # Cache block mask (fixed seq_len, no padding for this model)
+        self._cached_block_mask = None
+        self._cached_device = None
+
+    def _n_flex_heads(self) -> int:
+        n_heads = self.cfg.hidden_size // self.cfg.head_size
+        if self.cfg.attention_type == "dual_triangle":
+            return 2 * n_heads
+        return n_heads
+
     def set_positions_enabled(self, enabled: bool) -> None:
         self._positions_enabled = enabled
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (b, l)
-        if x.ndim != 2:
-            raise ValueError(f"Expected x of shape (b, l), got {tuple(x.shape)}")
-        if x.shape[1] != self.cfg.seq_len:
-            raise ValueError(f"Expected seq_len={self.cfg.seq_len}, got {x.shape[1]}")
+    def _get_block_mask(self, device: torch.device) -> object:
+        if self._cached_block_mask is not None and self._cached_device == device:
+            return self._cached_block_mask
+        self._cached_block_mask = build_block_mask(
+            attention_type=self.cfg.attention_type,
+            B=1,  # broadcast across batch
+            n_heads=self._n_flex_heads(),
+            seq_len=self.cfg.seq_len,
+            device=device,
+        )
+        self._cached_device = device
+        return self._cached_block_mask
 
-        # Inputs are expected to be token IDs in [1, vocab_size] inclusive.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.ndim == 2, f"Expected x of shape (b, l), got {tuple(x.shape)}"
+        assert x.shape[1] == self.cfg.seq_len, f"Expected seq_len={self.cfg.seq_len}, got {x.shape[1]}"
+
         if torch.compiler.is_compiling():
-            # Avoid graph breaks from Tensor.item() while still enforcing the invariant.
             torch._assert(torch.all(x >= 1), "Token IDs must be >= 1")
             torch._assert(
                 torch.all(x <= self.cfg.vocab_size),
@@ -398,49 +221,44 @@ class PositionProbeTransformer(nn.Module):
         else:
             x_min = int(torch.min(x).item())
             x_max = int(torch.max(x).item())
-            if x_min < 1 or x_max > self.cfg.vocab_size:
-                raise ValueError(
-                    f"Token IDs must be in [1, {self.cfg.vocab_size}], got min={x_min} max={x_max}"
-                )
+            assert 1 <= x_min and x_max <= self.cfg.vocab_size, (
+                f"Token IDs must be in [1, {self.cfg.vocab_size}], got min={x_min} max={x_max}"
+            )
 
-        # Map 1..vocab_size -> 0..vocab_size-1 for embedding lookup.
-        h = self.tok_emb(x - 1)  # (b, l, d)
+        h = self.tok_emb(x - 1)
         if self.pos_emb is not None and self._positions_enabled:
-            h = h + self.pos_emb.unsqueeze(0)  # (1, l, d) -> broadcast
+            h = h + self.pos_emb.unsqueeze(0)
 
         rope_cos = None
         rope_sin = None
         if self.rope is not None and self._positions_enabled:
             rope_cos, rope_sin = self.rope(device=h.device, dtype=h.dtype)
 
-        h = self.drop_in(h) # (b, l, d)
-        for blk in self.blocks:
-            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=None)
-        h = self.ln_f(h) # (b, l, d)
+        h = self.drop_in(h)
 
-        # Pool across positions
-        scores = self.pool_score(h).squeeze(-1)  # (b, l)
-        weights = torch.softmax(scores, dim=1)  # (b, l)
-        pooled = torch.sum(h * weights.unsqueeze(-1), dim=1)  # (b, d)
-        logits = self.classifier(pooled)  # (b, l)
+        block_mask = self._get_block_mask(h.device)
+        for blk in self.blocks:
+            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, block_mask=block_mask)
+        h = self.ln_f(h)
+
+        scores = self.pool_score(h).squeeze(-1)
+        weights = torch.softmax(scores, dim=1)
+        pooled = torch.sum(h * weights.unsqueeze(-1), dim=1)
+        logits = self.classifier(pooled)
         return logits
 
 
-class TransformerLM(nn.Module):
-    """
-    Transformer that returns per-token logits for language modeling.
+# ---------------------------------------------------------------------------
+# Transformer LM (Flat, for MLM - Experiment 2 baseline)
+# ---------------------------------------------------------------------------
 
-    - Supports positional_mode: none | learned_abs | rotary
-    - Supports attention_type: causal | bidirectional | dual_triangle
-    - Allows variable sequence length <= cfg.seq_len
-    """
+class TransformerLM(nn.Module):
+    """Flat transformer for per-token language modeling."""
 
     def __init__(self, cfg: TransformerConfig) -> None:
         super().__init__()
-        if cfg.positional_mode not in {"none", "learned_abs", "rotary"}:
-            raise ValueError(f"positional_mode must be none|learned_abs|rotary, got {cfg.positional_mode}")
-        if cfg.attention_type not in {"causal", "bidirectional", "dual_triangle"}:
-            raise ValueError(f"attention_type must be causal|bidirectional|dual_triangle, got {cfg.attention_type}")
+        assert cfg.positional_mode in {"none", "learned_abs", "rotary"}
+        assert cfg.attention_type in {"causal", "bidirectional", "dual_triangle"}
 
         self.cfg = cfg
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
@@ -452,27 +270,23 @@ class TransformerLM(nn.Module):
             self.pos_emb = None
 
         if cfg.positional_mode == "rotary":
-            if cfg.hidden_size % cfg.head_size != 0:
-                raise ValueError(f"hidden_size={cfg.hidden_size} must be divisible by head_size={cfg.head_size}")
-            if cfg.head_size % 2 != 0:
-                raise ValueError(f"RoPE requires even head_size, got head_size={cfg.head_size}")
+            assert cfg.hidden_size % cfg.head_size == 0
+            assert cfg.head_size % 2 == 0, f"RoPE requires even head_size, got {cfg.head_size}"
             self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
         else:
             self.rope = None
 
         self.drop_in = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(
-            [
-                TransformerBlock(
-                    hidden_size=cfg.hidden_size,
-                    head_size=cfg.head_size,
-                    intermediate_size=cfg.intermediate_size,
-                    dropout=cfg.dropout,
-                    attention_type=cfg.attention_type,
-                )
-                for _ in range(cfg.n_layers)
-            ]
-        )
+        self.blocks = nn.ModuleList([
+            TransformerBlock(
+                hidden_size=cfg.hidden_size,
+                head_size=cfg.head_size,
+                intermediate_size=cfg.intermediate_size,
+                dropout=cfg.dropout,
+                attention_type=cfg.attention_type,
+            )
+            for _ in range(cfg.n_layers)
+        ])
         self.ln_f = nn.LayerNorm(cfg.hidden_size)
         self.lm_head = nn.Sequential(
             nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=True),
@@ -481,37 +295,185 @@ class TransformerLM(nn.Module):
         )
         self._positions_enabled = True
 
+    def _n_flex_heads(self) -> int:
+        n_heads = self.cfg.hidden_size // self.cfg.head_size
+        if self.cfg.attention_type == "dual_triangle":
+            return 2 * n_heads
+        return n_heads
+
     def set_positions_enabled(self, enabled: bool) -> None:
         self._positions_enabled = enabled
 
     def forward(self, x: torch.Tensor, *, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
-        # x: (b, t)
-        if x.ndim != 2:
-            raise ValueError(f"Expected x of shape (b, t), got {tuple(x.shape)}")
-        if x.shape[1] > self.cfg.seq_len:
-            raise ValueError(f"Expected seq_len <= {self.cfg.seq_len}, got {x.shape[1]}")
-        if attention_mask is not None:
-            if attention_mask.ndim != 2:
-                raise ValueError(f"attention_mask must have shape (b, t), got {tuple(attention_mask.shape)}")
-            if attention_mask.shape[0] != x.shape[0] or attention_mask.shape[1] != x.shape[1]:
-                raise ValueError(
-                    f"attention_mask shape {tuple(attention_mask.shape)} must match input shape {tuple(x.shape)}"
-                )
+        assert x.ndim == 2, f"Expected x of shape (b, t), got {tuple(x.shape)}"
+        assert x.shape[1] <= self.cfg.seq_len, f"Expected seq_len <= {self.cfg.seq_len}, got {x.shape[1]}"
 
+        bsz, t = x.shape
         h = self.tok_emb(x)
         if self.pos_emb is not None and self._positions_enabled:
-            h = h + self.pos_emb[: h.shape[1]].unsqueeze(0)
+            h = h + self.pos_emb[:t].unsqueeze(0)
 
         rope_cos = None
         rope_sin = None
         if self.rope is not None and self._positions_enabled:
             rope_cos, rope_sin = self.rope(device=h.device, dtype=h.dtype)
-            rope_cos = rope_cos[:, :, : h.shape[1], :]
-            rope_sin = rope_sin[:, :, : h.shape[1], :]
+            rope_cos = rope_cos[:, :, :t, :]
+            rope_sin = rope_sin[:, :, :t, :]
 
         h = self.drop_in(h)
+
+        block_mask = build_block_mask(
+            attention_type=self.cfg.attention_type,
+            B=bsz,
+            n_heads=self._n_flex_heads(),
+            seq_len=t,
+            device=h.device,
+            attention_mask=attention_mask,
+        )
+
         for blk in self.blocks:
-            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, attention_mask=attention_mask)
+            h = blk(h, rope_cos=rope_cos, rope_sin=rope_sin, block_mask=block_mask)
+        h = self.ln_f(h)
+        logits = self.lm_head(h)
+        return logits
+
+
+# ---------------------------------------------------------------------------
+# UNet Transformer LM (Experiment 2)
+# ---------------------------------------------------------------------------
+
+class TransformerLMUNet(nn.Module):
+    """UNet-style transformer for per-token language modeling.
+
+    Architecture:
+    - Encoder half: layers save skip connections
+    - Decoder half: layers add back skip connections with learnable weights
+    - Value embeddings: per-layer embeddings mixed via lambdas
+    - x0 mixing: original input residual mixed into each layer
+    """
+
+    def __init__(self, cfg: TransformerConfig) -> None:
+        super().__init__()
+        assert cfg.positional_mode in {"none", "learned_abs", "rotary"}
+        assert cfg.attention_type in {"causal", "bidirectional", "dual_triangle"}
+        assert cfg.n_layers % 2 == 0, f"UNet requires even n_layers, got {cfg.n_layers}"
+
+        self.cfg = cfg
+        self.n_encoder_layers = cfg.n_layers // 2
+        self.n_decoder_layers = cfg.n_layers // 2
+
+        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+
+        if cfg.positional_mode == "learned_abs":
+            self.pos_emb = nn.Parameter(torch.zeros(cfg.seq_len, cfg.hidden_size))
+            nn.init.normal_(self.pos_emb, mean=0.0, std=0.02)
+        else:
+            self.pos_emb = None
+
+        if cfg.positional_mode == "rotary":
+            assert cfg.hidden_size % cfg.head_size == 0
+            assert cfg.head_size % 2 == 0, f"RoPE requires even head_size, got {cfg.head_size}"
+            self.rope = RotaryPositionEmbedding(seq_len=cfg.seq_len, d_rot=cfg.head_size)
+        else:
+            self.rope = None
+
+        self.drop_in = nn.Dropout(cfg.dropout)
+
+        # All layers are UNet-style blocks
+        self.blocks = nn.ModuleList([
+            TransformerBlock(
+                hidden_size=cfg.hidden_size,
+                head_size=cfg.head_size,
+                intermediate_size=cfg.intermediate_size,
+                dropout=cfg.dropout,
+                attention_type=cfg.attention_type,
+                unet=True,
+            )
+            for _ in range(cfg.n_layers)
+        ])
+
+        # Skip connection weights for decoder layers
+        self.skip_weights = nn.Parameter(torch.ones(self.n_decoder_layers))
+
+        # Value embeddings
+        self.value_embeds = ValueEmbedding(cfg.vocab_size, cfg.hidden_size, self.n_encoder_layers)
+
+        self.ln_f = nn.LayerNorm(cfg.hidden_size)
+        self.lm_head = nn.Sequential(
+            nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=True),
+            nn.GELU(),
+            nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=True),
+        )
+        self._positions_enabled = True
+
+    def _n_flex_heads(self) -> int:
+        n_heads = self.cfg.hidden_size // self.cfg.head_size
+        if self.cfg.attention_type == "dual_triangle":
+            return 2 * n_heads
+        return n_heads
+
+    def set_positions_enabled(self, enabled: bool) -> None:
+        self._positions_enabled = enabled
+
+    def forward(self, x: torch.Tensor, *, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        assert x.ndim == 2, f"Expected x of shape (b, t), got {tuple(x.shape)}"
+        assert x.shape[1] <= self.cfg.seq_len, f"Expected seq_len <= {self.cfg.seq_len}, got {x.shape[1]}"
+
+        bsz, t = x.shape
+
+        # Value embeddings from raw input_ids
+        ve = self.value_embeds(x)
+        ve_enc = ve[:self.n_encoder_layers]
+        ve_dec = ve[self.n_encoder_layers:]
+
+        h = self.tok_emb(x)
+        if self.pos_emb is not None and self._positions_enabled:
+            h = h + self.pos_emb[:t].unsqueeze(0)
+
+        rope_cos = None
+        rope_sin = None
+        if self.rope is not None and self._positions_enabled:
+            rope_cos, rope_sin = self.rope(device=h.device, dtype=h.dtype)
+            rope_cos = rope_cos[:, :, :t, :]
+            rope_sin = rope_sin[:, :, :t, :]
+
+        h = self.drop_in(h)
+        x0 = h.clone()
+
+        block_mask = build_block_mask(
+            attention_type=self.cfg.attention_type,
+            B=bsz,
+            n_heads=self._n_flex_heads(),
+            seq_len=t,
+            device=h.device,
+            attention_mask=attention_mask,
+        )
+
+        # Encoder
+        skip_connections = []
+        for i in range(self.n_encoder_layers):
+            h = self.blocks[i](
+                h,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                block_mask=block_mask,
+                x0=x0,
+                vi=ve_enc[i],
+            )
+            skip_connections.append(h)
+
+        # Decoder
+        for i in range(self.n_decoder_layers):
+            h = h + self.skip_weights[i] * skip_connections.pop()
+            h = self.blocks[self.n_encoder_layers + i](
+                h,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                block_mask=block_mask,
+                x0=x0,
+                vi=ve_dec[i],
+            )
+
         h = self.ln_f(h)
         logits = self.lm_head(h)
         return logits

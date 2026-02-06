@@ -1,3 +1,5 @@
+"""Training loop for Experiment 2: masked language modeling."""
+
 from __future__ import annotations
 
 import math
@@ -9,7 +11,8 @@ from dataclasses import dataclass
 from typing import Iterable, Iterator
 from tqdm import trange
 
-from src.models.transformer import TransformerConfig, TransformerLM
+from src.models.transformer import TransformerConfig, TransformerLM, TransformerLMUNet
+from src.training.optimizer import build_optimizer
 from src.utils.seed import set_global_seed
 
 
@@ -26,6 +29,9 @@ class MLMTrainConfig:
     drop_positions_step: int | None
     amp: bool
     mlm_probability: float
+    use_unet: bool = True
+    grad_clip: float = 1.0
+    muon_lr: float = 0.02
 
 
 @torch.inference_mode()
@@ -84,16 +90,12 @@ def _eval_mlm(
         all_preds.extend(preds[mask].flatten().tolist())
         all_labels.extend(labels[mask].flatten().tolist())
 
-    if total_count == 0:
-        raise ValueError("No masked tokens in evaluation batches; cannot compute metrics.")
+    assert total_count > 0, "No masked tokens in evaluation batches; cannot compute metrics."
 
     acc = float(total_correct) / float(total_count)
     loss_mean = total_loss / float(eval_steps)
 
-    # Compute F1 (micro) and MCC for multiclass labels.
-    # F1 micro is identical to accuracy for multiclass; we keep it explicit for clarity.
     from sklearn.metrics import f1_score, matthews_corrcoef
-
     f1 = float(f1_score(all_labels, all_preds, average="micro"))
     mcc = float(matthews_corrcoef(all_labels, all_preds))
 
@@ -129,9 +131,13 @@ def init_mlm_model(
     seed: int,
     device: torch.device,
     compile_model: bool,
-) -> TransformerLM:
+    use_unet: bool = True,
+) -> nn.Module:
     set_global_seed(seed)
-    model = TransformerLM(model_cfg).to(device)
+    if use_unet:
+        model = TransformerLMUNet(model_cfg).to(device)
+    else:
+        model = TransformerLM(model_cfg).to(device)
     if compile_model and sys.platform.startswith("linux"):
         model = torch.compile(model)
     return model
@@ -139,7 +145,7 @@ def init_mlm_model(
 
 def train_mlm_phase(
     *,
-    model: TransformerLM,
+    model: nn.Module,
     train_cfg: MLMTrainConfig,
     device: torch.device,
     train_iter: Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
@@ -149,12 +155,23 @@ def train_mlm_phase(
     history_rows: list[dict[str, float | int | str]],
     start_global_step: int,
 ) -> tuple[dict[str, float], int]:
-    opt = torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
+    # Build optimizer: Muon+Adam for UNet, plain AdamW for flat transformer
+    if train_cfg.use_unet:
+        optimizers = build_optimizer(
+            model,
+            muon_lr=train_cfg.muon_lr,
+            adam_lr=train_cfg.lr,
+            weight_decay=train_cfg.weight_decay,
+        )
+    else:
+        optimizers = [torch.optim.AdamW(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)]
+
     total_steps = train_cfg.max_evals * train_cfg.steps_per_eval
-    if total_steps <= 0:
-        raise ValueError(f"total_steps must be > 0, got {total_steps}")
-    if train_cfg.warmup_steps <= 0:
-        raise ValueError(f"warmup_steps must be > 0, got {train_cfg.warmup_steps}")
+    assert total_steps > 0, f"total_steps must be > 0, got {total_steps}"
+    assert train_cfg.warmup_steps > 0, f"warmup_steps must be > 0, got {train_cfg.warmup_steps}"
+
+    use_amp = bool(train_cfg.amp) and (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     def _lr_at_step(step: int) -> float:
         if step < train_cfg.warmup_steps:
@@ -172,7 +189,6 @@ def train_mlm_phase(
 
     for eval_idx in range(train_cfg.max_evals):
         model.train()
-        use_amp = bool(train_cfg.amp) and (device.type == "cuda")
         epoch_bar = trange(
             train_cfg.steps_per_eval,
             disable=not progress,
@@ -186,13 +202,14 @@ def train_mlm_phase(
                     model.set_positions_enabled(False)
 
             lr = _lr_at_step(global_step)
-            for group in opt.param_groups:
-                group["lr"] = lr
+            for opt in optimizers:
+                for group in opt.param_groups:
+                    group["lr"] = lr
 
             input_ids, attention_mask, labels = next(train_iter)
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
+            input_ids = input_ids.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             if use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
@@ -213,24 +230,33 @@ def train_mlm_phase(
             loss_val = float(loss.item())
             loss_sum += loss_val
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            for opt in optimizers:
+                opt.zero_grad(set_to_none=True)
+
+            scaler.scale(loss).backward()
+
+            # Gradient clipping
+            if train_cfg.grad_clip > 0:
+                for opt in optimizers:
+                    scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+
+            for opt in optimizers:
+                scaler.step(opt)
+            scaler.update()
 
             global_step += 1
             if progress and (global_step % max(1, train_cfg.steps_per_eval // 4) == 0):
                 epoch_bar.set_postfix(loss=loss_val, lr=float(lr))
 
         train_loss = loss_sum / float(train_cfg.steps_per_eval)
-        history_rows.append(
-            {
-                "phase": phase_name,
-                "split": "train",
-                "eval_idx": eval_idx,
-                "global_step": global_step,
-                "loss": train_loss,
-            }
-        )
+        history_rows.append({
+            "phase": phase_name,
+            "split": "train",
+            "eval_idx": eval_idx,
+            "global_step": global_step,
+            "loss": train_loss,
+        })
 
         metrics = _eval_mlm(
             model=model,
@@ -239,18 +265,16 @@ def train_mlm_phase(
             eval_batches=train_cfg.eval_batches,
             amp=train_cfg.amp,
         )
-        history_rows.append(
-            {
-                "phase": phase_name,
-                "split": "valid",
-                "eval_idx": eval_idx,
-                "global_step": global_step,
-                "loss": metrics["loss"],
-                "acc": metrics["acc"],
-                "f1": metrics["f1"],
-                "mcc": metrics["mcc"],
-            }
-        )
+        history_rows.append({
+            "phase": phase_name,
+            "split": "valid",
+            "eval_idx": eval_idx,
+            "global_step": global_step,
+            "loss": metrics["loss"],
+            "acc": metrics["acc"],
+            "f1": metrics["f1"],
+            "mcc": metrics["mcc"],
+        })
 
         improved = metrics["acc"] > best_metric
         if improved:
@@ -269,18 +293,9 @@ def train_mlm_phase(
         if bad_evals > train_cfg.patience:
             break
 
-    if "loss" in best_metrics:
-        best_eval_loss = float(best_metrics["loss"])
-    else:
-        best_eval_loss = float("nan")
-    if "f1" in best_metrics:
-        best_eval_f1 = float(best_metrics["f1"])
-    else:
-        best_eval_f1 = float("nan")
-    if "mcc" in best_metrics:
-        best_eval_mcc = float(best_metrics["mcc"])
-    else:
-        best_eval_mcc = float("nan")
+    best_eval_loss = float(best_metrics["loss"]) if "loss" in best_metrics else float("nan")
+    best_eval_f1 = float(best_metrics["f1"]) if "f1" in best_metrics else float("nan")
+    best_eval_mcc = float(best_metrics["mcc"]) if "mcc" in best_metrics else float("nan")
 
     summary = {
         "best_eval_idx": best_eval_idx,

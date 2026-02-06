@@ -1,12 +1,18 @@
+"""Experiment 1: Argmax position probe.
+
+Tests whether different attention types can learn positional information
+by predicting which position contains the maximum token ID.
+"""
+
 import src.entrypoint_setup
 
-import pandas as pd
-import subprocess
 import argparse
+import subprocess
 import sys
+import pandas as pd
 from pathlib import Path
 
-from src.experiment.plot_results import plot_all
+from src.plotting.plot_argmax import plot_all
 
 
 COMMAND_ARGS = [
@@ -34,7 +40,7 @@ def _python_cmd() -> str:
 
 def _build_commands() -> list[str]:
     py_cmd = _python_cmd()
-    return [f"{py_cmd} -m src.experiment.run_sweep {args}" for args in COMMAND_ARGS]
+    return [f"{py_cmd} -m src.training.sweep_argmax {args}" for args in COMMAND_ARGS]
 
 
 def run_experiments():
@@ -42,14 +48,13 @@ def run_experiments():
     for i, cmd in enumerate(commands, 1):
         print(f"\n--- Running experiment {i}/{len(commands)} ---")
         print(f"Command: {cmd}")
-        # Note: Using shell=True for convenience with the 'py -m ...' format on Windows
         subprocess.run(cmd, shell=True, check=True)
 
 
 def compile_and_plot(out_dir_path: Path):
     root = Path(".")
     group_dirs = sorted(list(root.glob("group_*")))
-    
+
     if not group_dirs:
         print("No group_* directories found in current path.")
         return
@@ -63,24 +68,20 @@ def compile_and_plot(out_dir_path: Path):
         results_file = d / "results.csv"
         if results_file.exists():
             print(f"Reading {results_file}")
-            try:
-                df = pd.read_csv(results_file)
-                all_dfs.append(df)
-            except Exception as e:
-                print(f"Error reading {results_file}: {e}")
+            all_dfs.append(pd.read_csv(results_file))
 
     if not all_dfs:
         print("No results.csv files were found or could be read.")
         return
 
     combined_df = pd.concat(all_dfs, ignore_index=True)
-    
+
     config_cols = [
-        "attention_type", "positional_mode", "drop_positions_step", 
+        "attention_type", "positional_mode", "drop_positions_step",
         "label_mode", "n_layers", "hidden_size", "head_size", "seed"
     ]
     present_cols = [c for c in config_cols if c in combined_df.columns]
-    
+
     if present_cols:
         before = len(combined_df)
         combined_df = combined_df.drop_duplicates(subset=present_cols)
@@ -92,31 +93,27 @@ def compile_and_plot(out_dir_path: Path):
     combined_csv = out_dir_path / "results.csv"
     combined_df.to_csv(combined_csv, index=False)
     print(f"Saved {len(combined_df)} combined result rows to {combined_csv}")
-    
+
     plots_dir = out_dir_path / "plots"
     print(f"Generating plots in {plots_dir}...")
-    try:
-        plot_all(results_csv=combined_csv, out_dir=plots_dir)
-        print("Plotting complete.")
-    except Exception as e:
-        print(f"Error during plotting: {e}")
+    plot_all(results_csv=combined_csv, out_dir=plots_dir)
+    print("Plotting complete.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run all experiments and compile results.")
+    parser = argparse.ArgumentParser(description="Run Experiment 1 (argmax position probe) and compile results.")
     parser.add_argument("--out_dir", type=str, default="compiled_results", help="Directory to save combined results and plots.")
     parser.add_argument("--skip_runs", action="store_true", help="Skip running experiments and only compile/plot.")
     parser.add_argument("--bugfix", action="store_true", help="Run a cheap bugfix sweep with checks.")
     args = parser.parse_args()
 
     if args.bugfix:
-        from src.experiment.bugfix_checks import run_experiment1_checks
-        from src.experiment.plot_results import plot_all
+        from src.training.bugfix_checks import run_experiment1_checks
 
         run_experiment1_checks()
         py_cmd = _python_cmd()
         cmd = (
-            f"{py_cmd} -m src.experiment.run_sweep "
+            f"{py_cmd} -m src.training.sweep_argmax "
             "--out_dir outputs_bugfix_exp1 "
             "--device cpu "
             "--steps 2 --max_evals 1 --patience 0 "

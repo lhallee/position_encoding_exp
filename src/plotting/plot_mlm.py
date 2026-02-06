@@ -1,3 +1,5 @@
+"""Plotting for Experiment 2: MLM results (NL and protein)."""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -63,21 +65,12 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
     ]
     history_df["Variant"] = history_df["Attention"] + " / " + history_df["Condition"]
 
-    # ----------------------------
     # Figure 1: Training loss over time
-    # ----------------------------
     train_df = history_df[history_df["split"] == "train"].copy()
     if len(train_df) > 0:
         g = sns.relplot(
-            data=train_df,
-            x="global_step",
-            y="loss",
-            hue="Variant",
-            col="phase",
-            kind="line",
-            errorbar="sd",
-            height=3.2,
-            aspect=1.2,
+            data=train_df, x="global_step", y="loss", hue="Variant",
+            col="phase", kind="line", errorbar="sd", height=3.2, aspect=1.2,
         )
         g.set_axis_labels("Global step", "Train loss")
         for ax in g.axes.flatten():
@@ -85,9 +78,7 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
         _savefig(g.figure, out_dir, "figure1_train_loss_over_time")
         plt.close(g.figure)
 
-    # ----------------------------
     # Figure 2: Validation metrics over time
-    # ----------------------------
     valid_df = history_df[history_df["split"] == "valid"].copy()
     if len(valid_df) > 0:
         metric_cols = ["loss", "acc", "f1", "mcc"]
@@ -96,21 +87,11 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
                 valid_df[col] = np.nan
         long_df = valid_df.melt(
             id_vars=["phase", "global_step", "Variant"],
-            value_vars=metric_cols,
-            var_name="metric",
-            value_name="value",
+            value_vars=metric_cols, var_name="metric", value_name="value",
         )
         g = sns.relplot(
-            data=long_df,
-            x="global_step",
-            y="value",
-            hue="Variant",
-            row="phase",
-            col="metric",
-            kind="line",
-            errorbar="sd",
-            height=2.6,
-            aspect=1.0,
+            data=long_df, x="global_step", y="value", hue="Variant",
+            row="phase", col="metric", kind="line", errorbar="sd", height=2.6, aspect=1.0,
         )
         g.set_axis_labels("Global step", "Value")
         for ax in g.axes.flatten():
@@ -118,9 +99,7 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
         _savefig(g.figure, out_dir, "figure2_valid_metrics_over_time")
         plt.close(g.figure)
 
-    # ----------------------------
     # Figure 3: Final validation metrics (best eval)
-    # ----------------------------
     if len(results_df) > 0:
         results_df["Attention"] = results_df["attention_type"].map(_pretty_attention)
         results_df["Condition"] = [
@@ -140,31 +119,22 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
             }
             for metric, col in metric_map.items():
                 if col in results_df.columns:
-                    valid_rows.append(
-                        {
-                            "Variant": row["Variant"],
-                            "dataset": dataset,
-                            "metric": metric,
-                            "value": row[col],
-                        }
-                    )
+                    valid_rows.append({
+                        "Variant": row["Variant"],
+                        "dataset": dataset,
+                        "metric": metric,
+                        "value": row[col],
+                    })
 
         for _, row in results_df.iterrows():
             _maybe_add_valid(row, dataset="NL", prefix="nl")
             _maybe_add_valid(row, dataset="Protein", prefix="prot")
 
         if len(valid_rows) > 0:
-            valid_df = pd.DataFrame(valid_rows)
+            valid_plot_df = pd.DataFrame(valid_rows)
             g = sns.catplot(
-                data=valid_df,
-                x="Variant",
-                y="value",
-                col="dataset",
-                row="metric",
-                kind="bar",
-                height=2.4,
-                aspect=1.6,
-                errorbar="sd",
+                data=valid_plot_df, x="Variant", y="value", col="dataset", row="metric",
+                kind="bar", height=2.4, aspect=1.6, errorbar="sd",
             )
             g.set_axis_labels("", "Value")
             for ax in g.axes.flatten():
@@ -173,9 +143,7 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
             _savefig(g.figure, out_dir, "figure3_final_valid_metrics")
             plt.close(g.figure)
 
-    # ----------------------------
     # Figure 4: Final test performance (extended context)
-    # ----------------------------
     if len(results_df) > 0:
         test_rows = []
 
@@ -188,31 +156,22 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
             }
             for metric, col in metric_map.items():
                 if col in results_df.columns:
-                    test_rows.append(
-                        {
-                            "Variant": row["Variant"],
-                            "dataset": dataset,
-                            "metric": metric,
-                            "value": row[col],
-                        }
-                    )
+                    test_rows.append({
+                        "Variant": row["Variant"],
+                        "dataset": dataset,
+                        "metric": metric,
+                        "value": row[col],
+                    })
 
         for _, row in results_df.iterrows():
             _maybe_add_test(row, dataset="NL", prefix="nl")
             _maybe_add_test(row, dataset="Protein", prefix="prot")
 
         if len(test_rows) > 0:
-            test_df = pd.DataFrame(test_rows)
+            test_plot_df = pd.DataFrame(test_rows)
             g = sns.catplot(
-                data=test_df,
-                x="Variant",
-                y="value",
-                col="dataset",
-                row="metric",
-                kind="bar",
-                height=2.4,
-                aspect=1.6,
-                errorbar="sd",
+                data=test_plot_df, x="Variant", y="value", col="dataset", row="metric",
+                kind="bar", height=2.4, aspect=1.6, errorbar="sd",
             )
             g.set_axis_labels("", "Value")
             for ax in g.axes.flatten():

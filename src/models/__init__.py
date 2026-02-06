@@ -1,2 +1,1 @@
-"""Model definitions."""
-
+"""Model definitions: attention, components, and transformer architectures."""

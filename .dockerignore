@@ -1,0 +1,57 @@
+# Output directories - accessed via volume mount
+outputs*/
+group_*/
+compiled_results/
+figures/
+
+# Cache directories
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git
+.git/
+.gitignore
+.gitmodules
+
+# SpeedrunningPLMs submodule (reference only, not needed in image)
+SpeedrunningPLMs/
+
+# IDE and editor files
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python virtual environments
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Logs
+*.log
+logs/
+
+# PDFs and large files
+*.pdf
+
+# Temporary
+tmp/
+temp/
