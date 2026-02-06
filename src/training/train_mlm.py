@@ -210,6 +210,8 @@ def train_mlm_phase(
     model.train()
     loss_sum = 0.0
     loss_count = 0
+    wandb_loss_sum = 0.0
+    wandb_loss_count = 0
 
     for step_in_phase in bar:
         if train_cfg.drop_positions_step is not None:
@@ -242,6 +244,8 @@ def train_mlm_phase(
         loss_val = float(loss.item())
         loss_sum += loss_val
         loss_count += 1
+        wandb_loss_sum += loss_val
+        wandb_loss_count += 1
 
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
@@ -252,6 +256,11 @@ def train_mlm_phase(
             opt.step()
 
         global_step += 1
+
+        if wandb_run is not None and wandb_loss_count >= 100:
+            wandb_run.log({"train/loss": wandb_loss_sum / wandb_loss_count, "train/lr": lr}, step=global_step)
+            wandb_loss_sum = 0.0
+            wandb_loss_count = 0
 
         if progress and (step_in_phase % max(1, train_cfg.total_steps // 20) == 0):
             avg_loss = loss_sum / max(1, loss_count)
@@ -268,11 +277,10 @@ def train_mlm_phase(
                 "loss": train_loss,
             })
 
-            if wandb_run is not None:
-                wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
-
             loss_sum = 0.0
             loss_count = 0
+            wandb_loss_sum = 0.0
+            wandb_loss_count = 0
 
             last_metrics = _eval_mlm(
                 model=model,
@@ -312,9 +320,6 @@ def train_mlm_phase(
             "global_step": global_step,
             "loss": train_loss,
         })
-
-        if wandb_run is not None:
-            wandb_run.log({"train/loss": train_loss, "train/lr": lr}, step=global_step)
 
     last_metrics = _eval_mlm(
         model=model,

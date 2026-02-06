@@ -100,15 +100,19 @@ def _fineweb_streams(
 ) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
     base = load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
     base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
-    valid = _take_n(base.take(valid_size), valid_size, name="FineWeb valid")
 
-    test_candidates = base.skip(valid_size)
-    test, consumed = _take_n_filtered_with_consumed(
+    valid, consumed_valid = _take_n_filtered_with_consumed(
+        base, valid_size, name="FineWeb valid",
+        tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
+    )
+
+    test_candidates = base.skip(consumed_valid)
+    test, consumed_test = _take_n_filtered_with_consumed(
         test_candidates, test_size, name="FineWeb test",
         tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
     )
 
-    train = base.skip(valid_size + consumed)
+    train = base.skip(consumed_valid + consumed_test)
     return train, valid, test
 
 
@@ -116,19 +120,21 @@ def _protein_streams(
     *, seed: int, shuffle_buffer: int, valid_size: int, test_size: int,
     tokenizer, text_key: str, test_seq_len: int,
 ) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
-    assert valid_size <= 10000, f"Protein valid_size must be <= 10000, got {valid_size}"
-    assert test_size <= 10000, f"Protein test_size must be <= 10000, got {test_size}"
+    base = load_dataset("Synthyra/omg_prot50", split="train", streaming=True)
+    base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
-    train = load_dataset("Synthyra/omg_prot50", split="train", streaming=True)
-    train = train.shuffle(seed=seed, buffer_size=shuffle_buffer)
-    valid_stream = load_dataset("Synthyra/omg_prot50", split="valid", streaming=True)
-    test_stream = load_dataset("Synthyra/omg_prot50", split="test", streaming=True)
-
-    valid = _take_n(valid_stream, valid_size, name="Protein valid")
-    test, _ = _take_n_filtered_with_consumed(
-        test_stream, test_size, name="Protein test",
+    valid, consumed_valid = _take_n_filtered_with_consumed(
+        base, valid_size, name="Protein valid",
         tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
     )
+
+    test_candidates = base.skip(consumed_valid)
+    test, consumed_test = _take_n_filtered_with_consumed(
+        test_candidates, test_size, name="Protein test",
+        tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
+    )
+
+    train = base.skip(consumed_valid + consumed_test)
     return train, valid, test
 
 
