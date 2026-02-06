@@ -21,6 +21,9 @@ def _make_dummy_dataset(texts: list[str]) -> list[dict]:
 def run_experiment1_checks() -> None:
     print("Running Experiment 1 checks...")
 
+    assert torch.cuda.is_available(), "CUDA is required for bugfix checks (flex_attention needs GPU)"
+    device = torch.device("cuda")
+
     # Test all attention types
     for attn_type in ["bidirectional", "causal", "dual_triangle"]:
         head_size = 16 if attn_type == "dual_triangle" else 8
@@ -35,8 +38,8 @@ def run_experiment1_checks() -> None:
             attention_type=attn_type,
             positional_mode="learned_abs",
         )
-        model = PositionProbeTransformer(cfg)
-        x = torch.randint(low=1, high=cfg.vocab_size + 1, size=(2, cfg.seq_len))
+        model = PositionProbeTransformer(cfg).to(device)
+        x = torch.randint(low=1, high=cfg.vocab_size + 1, size=(2, cfg.seq_len), device=device)
         logits = model(x)
         assert logits.shape == (2, cfg.seq_len), (
             f"Exp1 {attn_type} check failed: logits shape {tuple(logits.shape)}"
@@ -48,6 +51,9 @@ def run_experiment1_checks() -> None:
 
 def run_experiment2_checks() -> None:
     print("Running Experiment 2 checks...")
+
+    assert torch.cuda.is_available(), "CUDA is required for bugfix checks (flex_attention needs GPU)"
+    device = torch.device("cuda")
 
     tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
     assert tokenizer.mask_token_id is not None, "Tokenizer missing mask_token_id"
@@ -66,6 +72,9 @@ def run_experiment2_checks() -> None:
     )
     loader = build_mlm_dataloader(dataset=dataset, tokenizer=tokenizer, cfg=cfg, mlm_probability=0.15, num_workers=0)
     input_ids, attention_mask, labels = next(iter(loader))
+    input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device)
+    labels = labels.to(device)
 
     assert input_ids.shape == (2, cfg.seq_len), f"MLM batch shape mismatch: {tuple(input_ids.shape)}"
     assert attention_mask.shape == (2, cfg.seq_len), f"Attention mask shape mismatch: {tuple(attention_mask.shape)}"
@@ -86,7 +95,7 @@ def run_experiment2_checks() -> None:
         attention_type="bidirectional",
         positional_mode="learned_abs",
     )
-    model = TransformerLM(lm_cfg)
+    model = TransformerLM(lm_cfg).to(device)
     logits = model(input_ids, attention_mask=attention_mask)
     assert logits.shape == (2, cfg.seq_len, len(tokenizer)), (
         f"LM logits shape mismatch: {tuple(logits.shape)}"
@@ -105,7 +114,7 @@ def run_experiment2_checks() -> None:
         attention_type="bidirectional",
         positional_mode="learned_abs",
     )
-    unet_model = TransformerLMUNet(unet_cfg)
+    unet_model = TransformerLMUNet(unet_cfg).to(device)
     logits = unet_model(input_ids, attention_mask=attention_mask)
     assert logits.shape == (2, cfg.seq_len, len(tokenizer)), (
         f"UNet LM logits shape mismatch: {tuple(logits.shape)}"
@@ -124,7 +133,7 @@ def run_experiment2_checks() -> None:
         attention_type="dual_triangle",
         positional_mode="learned_abs",
     )
-    dt_model = TransformerLM(dt_cfg)
+    dt_model = TransformerLM(dt_cfg).to(device)
     logits = dt_model(input_ids, attention_mask=attention_mask)
     assert logits.shape == (2, cfg.seq_len, len(tokenizer)), (
         f"DualTriangle LM logits shape mismatch: {tuple(logits.shape)}"
