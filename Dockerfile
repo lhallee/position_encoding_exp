@@ -68,7 +68,7 @@ ENV PROJECT_ROOT=/workspace \
     TRANSFORMERS_CACHE=/workspace/.cache/huggingface \
     HF_HOME=/workspace/.cache/huggingface \
     TORCH_HOME=/workspace/.cache/torch \
-    XDG_CACHE_HOME=/workspace/.cache \
+    XDG_CACHE_HOME=/workspace/.cache
 
 RUN mkdir -p \
       /workspace/.cache/huggingface \
