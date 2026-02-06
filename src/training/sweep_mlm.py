@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 from src.plotting.plot_mlm import plot_all
 from src.training.train_mlm import MLMTrainConfig, eval_mlm, init_mlm_model, train_mlm_phase
 from src.models.transformer import TransformerConfig
-from src.data.mlm import StreamConfig, build_mlm_dataloader
+from src.data.mlm import FilteredStream, StreamConfig, build_mlm_dataloader
 from src.data.tokenizer import build_nlp_tokenizer
 from src.utils.seed import set_global_seed
 
@@ -25,12 +25,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, default="nl", choices=["nl", "protein"], help="Which dataset to run.")
     parser.add_argument("--out_dir", type=str, default="outputs_exp2", help="Output directory.")
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile (compiled by default on Linux).")
-    parser.add_argument("--steps", type=int, default=10000, help="Total training steps.")
-    parser.add_argument("--warmup_steps", type=int, default=1000, help="LR linear warmup steps.")
-    parser.add_argument("--cooldown_steps", type=int, default=1000, help="LR cosine cooldown steps.")
+    parser.add_argument("--total_tokens", type=int, default=1_000_000_000, help="Train until this many non-pad tokens have been seen (default 1B).")
+    parser.add_argument("--warmup_tokens", type=int, default=100_000_000, help="LR linear warmup token budget (default 100M).")
+    parser.add_argument("--cooldown_tokens", type=int, default=100_000_000, help="LR cosine cooldown token budget (default 100M).")
     parser.add_argument("--eval_every", type=int, default=1000, help="Evaluate every N training steps.")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
-    parser.add_argument("--eval_batches", type=int, default=8, help="Evaluation batches.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[11], help="Random seeds.")
     parser.add_argument("--train_seq_len", type=int, default=256, help="Training sequence length.")
     parser.add_argument("--test_seq_len", type=int, default=1024, help="Extended test sequence length.")
@@ -40,19 +39,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate (Adam).")
     parser.add_argument("--muon_lr", type=float, default=0.01, help="Learning rate (Muon).")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay.")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout probability.")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability.")
     parser.add_argument("--no_bfloat16", action="store_true", help="Disable bfloat16 casting (enabled by default on CUDA).")
     parser.add_argument("--mlm_prob", type=float, default=0.15, help="Masked LM probability.")
     parser.add_argument("--flush_every", type=int, default=1, help="Write results.csv every N runs (0=only at end).")
     parser.add_argument("--no_unet", action="store_true", help="Use flat transformer instead of UNet.")
     parser.add_argument(
         "--conditions", type=str, nargs="+",
-        default=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
+        default=["none", "rotary", "rotary_drop"],
         choices=["none", "learned_abs", "learned_abs_drop", "rotary", "rotary_drop"],
         help="Which positional/Drop conditions to run.",
     )
-    parser.add_argument("--valid_size", type=int, default=2000, help="Validation sample count.")
-    parser.add_argument("--test_size", type=int, default=2000, help="Test sample count.")
+    parser.add_argument("--valid_size", type=int, default=1000, help="Validation sample count.")
+    parser.add_argument("--test_size", type=int, default=1000, help="Test sample count.")
     parser.add_argument("--vocab_size", type=int, default=4096, help="BPE vocabulary size for NLP tokenizer (ignored for protein).")
     parser.add_argument("--fineweb_text_key", type=str, default="text", help="Text field in FineWeb-Edu.")
     parser.add_argument("--prot_text_key", type=str, default="sequence", help="Sequence field in omg_prot50.")
@@ -99,7 +98,7 @@ def _take_n_filtered_with_consumed(
 def _fineweb_streams(
     *, seed: int, shuffle_buffer: int, valid_size: int, test_size: int,
     tokenizer, text_key: str, test_seq_len: int,
-) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
+) -> tuple[Iterable[dict], list[dict], list[dict]]:
     base = load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
     base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
@@ -114,14 +113,19 @@ def _fineweb_streams(
         tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
     )
 
+    # Build eval text set and filter training stream to exclude eval documents
+    eval_texts = frozenset(
+        _select_text(s, text_key) for s in valid + test
+    )
     train = base.skip(consumed_valid + consumed_test)
+    train = FilteredStream(train, eval_texts, text_key)
     return train, valid, test
 
 
 def _protein_streams(
     *, seed: int, shuffle_buffer: int, valid_size: int, test_size: int,
     tokenizer, text_key: str, test_seq_len: int,
-) -> tuple[Iterable[dict], Iterable[dict], Iterable[dict]]:
+) -> tuple[Iterable[dict], list[dict], list[dict]]:
     base = load_dataset("Synthyra/omg_prot50", split="train", streaming=True)
     base = base.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
@@ -136,7 +140,12 @@ def _protein_streams(
         tokenizer=tokenizer, text_key=text_key, min_tokens=int(test_seq_len),
     )
 
+    # Build eval text set and filter training stream to exclude eval documents
+    eval_texts = frozenset(
+        _select_text(s, text_key) for s in valid + test
+    )
     train = base.skip(consumed_valid + consumed_test)
+    train = FilteredStream(train, eval_texts, text_key)
     return train, valid, test
 
 
@@ -202,15 +211,16 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
         text_key = args.prot_text_key
 
-    drop_after = int(2 * args.eval_every)
+    drop_after_tokens = int(args.total_tokens * 0.7)
     condition_map: dict[str, tuple[str, int]] = {
         "none": ("none", -1),
         "learned_abs": ("learned_abs", -1),
-        "learned_abs_drop": ("learned_abs", drop_after),
+        "learned_abs_drop": ("learned_abs", drop_after_tokens),
         "rotary": ("rotary", -1),
-        "rotary_drop": ("rotary", drop_after),
+        "rotary_drop": ("rotary", drop_after_tokens),
     }
     conditions: list[tuple[str, int]] = [condition_map[name] for name in args.conditions]
+    # conditions is list of (positional_mode, drop_tokens) where drop_tokens=-1 means no drop
     attention_types = ["bidirectional", "causal", "dual_triangle"]
 
     rows: list[dict[str, float | int | str]] = []
@@ -237,11 +247,16 @@ def main() -> None:
 
         train_loader = _build_loader(
             dataset=train_stream, tokenizer=tokenizer, seq_len=int(args.train_seq_len),
-            batch_size=int(args.batch_size), text_key=text_key, repeat=True,
+            batch_size=int(args.batch_size), text_key=text_key, repeat=False,
             mlm_probability=float(args.mlm_prob),
         )
-        valid_loader = _build_loader(
+        valid_short_loader = _build_loader(
             dataset=valid_stream, tokenizer=tokenizer, seq_len=int(args.train_seq_len),
+            batch_size=int(args.batch_size), text_key=text_key, repeat=False,
+            mlm_probability=float(args.mlm_prob),
+        )
+        valid_long_loader = _build_loader(
+            dataset=valid_stream, tokenizer=tokenizer, seq_len=int(args.test_seq_len),
             batch_size=int(args.batch_size), text_key=text_key, repeat=False,
             mlm_probability=float(args.mlm_prob),
         )
@@ -252,7 +267,7 @@ def main() -> None:
         )
 
         for attention_type in attention_types:
-            for positional_mode, drop_step in conditions:
+            for positional_mode, drop_tokens in conditions:
                 run_idx += 1
 
                 head_size = 128 if attention_type == "dual_triangle" else 64
@@ -278,27 +293,27 @@ def main() -> None:
 
                 print(
                     f"[{run_idx}/{total_runs}] seed={seed} attn={attention_type} pos={positional_mode} "
-                    f"drop={drop_step} device={device} unet={use_unet} bf16={use_bfloat16}"
+                    f"drop_tokens={drop_tokens} device={device} unet={use_unet} bf16={use_bfloat16}"
                 )
 
                 wandb_run = None
                 if use_wandb:
-                    run_name = f"s{seed}_{attention_type}_{positional_mode}_drop{drop_step}"
+                    run_name = f"s{seed}_{attention_type}_{positional_mode}_drop{drop_tokens}"
                     wandb_run = _start_wandb_run(
                         project=args.wandb_project,
                         config={
                             "seed": seed, "dataset": args.dataset,
                             "attention_type": attention_type,
                             "positional_mode": positional_mode,
-                            "drop_positions_step": drop_step,
+                            "drop_positions_tokens": drop_tokens,
                             "hidden_size": args.hidden_size,
                             "n_layers": args.n_layers, "head_size": head_size,
                             "train_seq_len": args.train_seq_len,
                             "test_seq_len": args.test_seq_len,
                             "use_unet": use_unet, "bfloat16": use_bfloat16,
-                            "total_steps": args.steps,
-                            "warmup_steps": args.warmup_steps,
-                            "cooldown_steps": args.cooldown_steps,
+                            "total_tokens": args.total_tokens,
+                            "warmup_tokens": args.warmup_tokens,
+                            "cooldown_tokens": args.cooldown_tokens,
                             "batch_size": args.batch_size,
                             "lr": args.lr, "muon_lr": args.muon_lr,
                             "weight_decay": args.weight_decay,
@@ -308,15 +323,14 @@ def main() -> None:
                     )
 
                 train_cfg = MLMTrainConfig(
-                    total_steps=int(args.steps),
-                    warmup_steps=int(args.warmup_steps),
-                    cooldown_steps=int(args.cooldown_steps),
+                    total_tokens=int(args.total_tokens),
+                    warmup_tokens=int(args.warmup_tokens),
+                    cooldown_tokens=int(args.cooldown_tokens),
                     eval_every=int(args.eval_every),
                     batch_size=int(args.batch_size),
                     lr=float(args.lr),
                     weight_decay=float(args.weight_decay),
-                    eval_batches=int(args.eval_batches),
-                    drop_positions_step=None if drop_step < 0 else int(drop_step),
+                    drop_positions_tokens=None if drop_tokens < 0 else int(drop_tokens),
                     mlm_probability=float(args.mlm_prob),
                     use_unet=use_unet,
                     muon_lr=float(args.muon_lr),
@@ -324,16 +338,19 @@ def main() -> None:
                 )
 
                 global_step = 0
-                summary, global_step = train_mlm_phase(
+                tokens_seen = 0
+                summary, global_step, tokens_seen = train_mlm_phase(
                     model=model,
                     train_cfg=train_cfg,
                     device=device,
                     train_iter=iter(train_loader),
-                    valid_loader=valid_loader,
+                    valid_short_loader=valid_short_loader,
+                    valid_long_loader=valid_long_loader,
                     progress=show_progress,
                     phase_name=phase_name,
                     history_rows=history_rows,
                     start_global_step=global_step,
+                    start_tokens_seen=tokens_seen,
                     wandb_run=wandb_run,
                 )
 
@@ -341,7 +358,6 @@ def main() -> None:
                     model=model,
                     device=device,
                     loader=test_loader,
-                    eval_batches=int(args.eval_batches),
                     progress=show_progress,
                 )
 
@@ -362,19 +378,23 @@ def main() -> None:
                     "seed": seed,
                     "attention_type": attention_type,
                     "positional_mode": positional_mode,
-                    "drop_positions_step": -1 if drop_step < 0 else int(drop_step),
+                    "drop_positions_tokens": -1 if drop_tokens < 0 else int(drop_tokens),
                     "hidden_size": int(args.hidden_size),
                     "n_layers": int(args.n_layers),
                     "head_size": int(head_size),
                     "train_seq_len": int(args.train_seq_len),
                     "test_seq_len": int(args.test_seq_len),
                     "use_unet": int(use_unet),
+                    "total_tokens_seen": tokens_seen,
                     f"{prefix}_best_eval_idx": summary["best_eval_idx"],
-                    f"{prefix}_best_eval_acc": summary["best_eval_acc"],
-                    f"{prefix}_best_valid_loss": summary["best_eval_loss"],
-                    f"{prefix}_best_valid_acc": summary["best_eval_acc"],
-                    f"{prefix}_best_valid_f1": summary["best_eval_f1"],
-                    f"{prefix}_best_valid_mcc": summary["best_eval_mcc"],
+                    f"{prefix}_best_valid_short_loss": summary["best_eval_short_loss"],
+                    f"{prefix}_best_valid_short_acc": summary["best_eval_short_acc"],
+                    f"{prefix}_best_valid_short_f1": summary["best_eval_short_f1"],
+                    f"{prefix}_best_valid_short_mcc": summary["best_eval_short_mcc"],
+                    f"{prefix}_best_valid_long_loss": summary["best_eval_long_loss"],
+                    f"{prefix}_best_valid_long_acc": summary["best_eval_long_acc"],
+                    f"{prefix}_best_valid_long_f1": summary["best_eval_long_f1"],
+                    f"{prefix}_best_valid_long_mcc": summary["best_eval_long_mcc"],
                     f"{prefix}_test_loss": test_metrics["loss"],
                     f"{prefix}_test_acc": test_metrics["acc"],
                     f"{prefix}_test_f1": test_metrics["f1"],
@@ -389,7 +409,7 @@ def main() -> None:
                     if "attention_type" not in hr:
                         hr["attention_type"] = attention_type
                         hr["positional_mode"] = positional_mode
-                        hr["drop_positions_step"] = -1 if drop_step < 0 else int(drop_step)
+                        hr["drop_positions_tokens"] = -1 if drop_tokens < 0 else int(drop_tokens)
                         hr["hidden_size"] = int(args.hidden_size)
                         hr["n_layers"] = int(args.n_layers)
                         hr["head_size"] = int(head_size)

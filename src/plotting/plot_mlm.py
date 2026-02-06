@@ -32,18 +32,18 @@ def _pretty_attention(attn: str) -> str:
     return attn
 
 
-def _pretty_condition(positional_mode: str, drop_positions_step: int) -> str:
+def _pretty_condition(positional_mode: str, drop_positions_tokens: int) -> str:
     if positional_mode == "none":
         return "None"
-    if positional_mode == "learned_abs" and int(drop_positions_step) < 0:
+    if positional_mode == "learned_abs" and int(drop_positions_tokens) < 0:
         return "Absolute"
-    if positional_mode == "learned_abs" and int(drop_positions_step) >= 0:
+    if positional_mode == "learned_abs" and int(drop_positions_tokens) >= 0:
         return "DroPE"
-    if positional_mode == "rotary" and int(drop_positions_step) < 0:
+    if positional_mode == "rotary" and int(drop_positions_tokens) < 0:
         return "RoPE"
-    if positional_mode == "rotary" and int(drop_positions_step) >= 0:
+    if positional_mode == "rotary" and int(drop_positions_tokens) >= 0:
         return "RoPE off"
-    return f"{positional_mode} (drop={int(drop_positions_step)})"
+    return f"{positional_mode} (drop={int(drop_positions_tokens)})"
 
 
 def _savefig(fig: plt.Figure, out_dir: Path, stem: str) -> None:
@@ -60,8 +60,8 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
 
     history_df["Attention"] = history_df["attention_type"].map(_pretty_attention)
     history_df["Condition"] = [
-        _pretty_condition(pm, ds)
-        for pm, ds in zip(history_df["positional_mode"], history_df["drop_positions_step"])
+        _pretty_condition(pm, dt)
+        for pm, dt in zip(history_df["positional_mode"], history_df["drop_positions_tokens"])
     ]
     history_df["Variant"] = history_df["Attention"] + " / " + history_df["Condition"]
 
@@ -69,71 +69,95 @@ def plot_all(*, results_csv: Path, history_csv: Path, out_dir: Path) -> None:
     train_df = history_df[history_df["split"] == "train"].copy()
     if len(train_df) > 0:
         g = sns.relplot(
-            data=train_df, x="global_step", y="loss", hue="Variant",
+            data=train_df, x="tokens_seen", y="loss", hue="Variant",
             col="phase", kind="line", errorbar="sd", height=3.2, aspect=1.2,
         )
-        g.set_axis_labels("Global step", "Train loss")
+        g.set_axis_labels("Tokens seen", "Train loss")
         for ax in g.axes.flatten():
             sns.despine(ax=ax)
         _savefig(g.figure, out_dir, "figure1_train_loss_over_time")
         plt.close(g.figure)
 
-    # Figure 2: Validation metrics over time
-    valid_df = history_df[history_df["split"] == "valid"].copy()
-    if len(valid_df) > 0:
+    # Figure 2: Validation-short metrics over time
+    valid_short_df = history_df[history_df["split"] == "valid_short"].copy()
+    if len(valid_short_df) > 0:
         metric_cols = ["loss", "acc", "f1", "mcc"]
         for col in metric_cols:
-            if col not in valid_df.columns:
-                valid_df[col] = np.nan
-        long_df = valid_df.melt(
-            id_vars=["phase", "global_step", "Variant"],
+            if col not in valid_short_df.columns:
+                valid_short_df[col] = np.nan
+        long_df = valid_short_df.melt(
+            id_vars=["phase", "tokens_seen", "Variant"],
             value_vars=metric_cols, var_name="metric", value_name="value",
         )
         g = sns.relplot(
-            data=long_df, x="global_step", y="value", hue="Variant",
+            data=long_df, x="tokens_seen", y="value", hue="Variant",
             row="phase", col="metric", kind="line", errorbar="sd", height=2.6, aspect=1.0,
         )
-        g.set_axis_labels("Global step", "Value")
+        g.set_axis_labels("Tokens seen", "Value")
         for ax in g.axes.flatten():
             sns.despine(ax=ax)
-        _savefig(g.figure, out_dir, "figure2_valid_metrics_over_time")
+        _savefig(g.figure, out_dir, "figure2a_valid_short_metrics_over_time")
         plt.close(g.figure)
 
-    # Figure 3: Final validation metrics (best eval)
+    # Figure 2b: Validation-long metrics over time
+    valid_long_df = history_df[history_df["split"] == "valid_long"].copy()
+    if len(valid_long_df) > 0:
+        metric_cols = ["loss", "acc", "f1", "mcc"]
+        for col in metric_cols:
+            if col not in valid_long_df.columns:
+                valid_long_df[col] = np.nan
+        long_df = valid_long_df.melt(
+            id_vars=["phase", "tokens_seen", "Variant"],
+            value_vars=metric_cols, var_name="metric", value_name="value",
+        )
+        g = sns.relplot(
+            data=long_df, x="tokens_seen", y="value", hue="Variant",
+            row="phase", col="metric", kind="line", errorbar="sd", height=2.6, aspect=1.0,
+        )
+        g.set_axis_labels("Tokens seen", "Value")
+        for ax in g.axes.flatten():
+            sns.despine(ax=ax)
+        _savefig(g.figure, out_dir, "figure2b_valid_long_metrics_over_time")
+        plt.close(g.figure)
+
+    # Figure 3: Final validation metrics (best eval, short and long)
     if len(results_df) > 0:
         results_df["Attention"] = results_df["attention_type"].map(_pretty_attention)
         results_df["Condition"] = [
-            _pretty_condition(pm, ds)
-            for pm, ds in zip(results_df["positional_mode"], results_df["drop_positions_step"])
+            _pretty_condition(pm, dt)
+            for pm, dt in zip(results_df["positional_mode"], results_df["drop_positions_tokens"])
         ]
         results_df["Variant"] = results_df["Attention"] + " / " + results_df["Condition"]
 
         valid_rows = []
 
-        def _maybe_add_valid(row: pd.Series, *, dataset: str, prefix: str) -> None:
+        def _maybe_add_valid(row: pd.Series, *, dataset: str, prefix: str, split: str) -> None:
             metric_map = {
-                "loss": f"{prefix}_best_valid_loss",
-                "acc": f"{prefix}_best_valid_acc",
-                "f1": f"{prefix}_best_valid_f1",
-                "mcc": f"{prefix}_best_valid_mcc",
+                "loss": f"{prefix}_best_valid_{split}_loss",
+                "acc": f"{prefix}_best_valid_{split}_acc",
+                "f1": f"{prefix}_best_valid_{split}_f1",
+                "mcc": f"{prefix}_best_valid_{split}_mcc",
             }
             for metric, col in metric_map.items():
                 if col in results_df.columns:
                     valid_rows.append({
                         "Variant": row["Variant"],
                         "dataset": dataset,
+                        "split": split,
                         "metric": metric,
                         "value": row[col],
                     })
 
         for _, row in results_df.iterrows():
-            _maybe_add_valid(row, dataset="NL", prefix="nl")
-            _maybe_add_valid(row, dataset="Protein", prefix="prot")
+            for split in ("short", "long"):
+                _maybe_add_valid(row, dataset="NL", prefix="nl", split=split)
+                _maybe_add_valid(row, dataset="Protein", prefix="prot", split=split)
 
         if len(valid_rows) > 0:
             valid_plot_df = pd.DataFrame(valid_rows)
             g = sns.catplot(
-                data=valid_plot_df, x="Variant", y="value", col="dataset", row="metric",
+                data=valid_plot_df, x="Variant", y="value", hue="split",
+                col="dataset", row="metric",
                 kind="bar", height=2.4, aspect=1.6, errorbar="sd",
             )
             g.set_axis_labels("", "Value")

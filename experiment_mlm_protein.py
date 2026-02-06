@@ -18,10 +18,8 @@ from src.plotting.plot_mlm import plot_all
 
 COMMAND_ARGS = [
     "--dataset protein --conditions none --out_dir group_protein_1",
-    "--dataset protein --conditions learned_abs --out_dir group_protein_2",
-    "--dataset protein --conditions learned_abs_drop --out_dir group_protein_3",
-    "--dataset protein --conditions rotary --out_dir group_protein_4",
-    "--dataset protein --conditions rotary_drop --out_dir group_protein_5",
+    "--dataset protein --conditions rotary --out_dir group_protein_2",
+    "--dataset protein --conditions rotary_drop --out_dir group_protein_3",
 ]
 
 
@@ -29,16 +27,18 @@ def _python_cmd() -> str:
     return "py" if sys.platform.startswith("win") else "python"
 
 
-def _build_commands(wandb_token: str | None = None) -> list[str]:
+def _build_commands(wandb_token: str | None = None, seeds: list[int] | None = None) -> list[str]:
     py_cmd = _python_cmd()
-    wandb_args = ""
+    extra_args = ""
     if wandb_token is not None:
-        wandb_args = f" --wandb_token {wandb_token} --wandb_project pos-encoding-mlm-protein"
-    return [f"{py_cmd} -m src.training.sweep_mlm {args}{wandb_args}" for args in COMMAND_ARGS]
+        extra_args += f" --wandb_token {wandb_token} --wandb_project pos-encoding-mlm-protein"
+    if seeds is not None:
+        extra_args += " --seeds " + " ".join(str(s) for s in seeds)
+    return [f"{py_cmd} -m src.training.sweep_mlm {args}{extra_args}" for args in COMMAND_ARGS]
 
 
-def run_experiments(wandb_token: str | None = None) -> None:
-    commands = _build_commands(wandb_token=wandb_token)
+def run_experiments(wandb_token: str | None = None, seeds: list[int] | None = None) -> None:
+    commands = _build_commands(wandb_token=wandb_token, seeds=seeds)
     for i, cmd in enumerate(commands, 1):
         print(f"\n--- Running experiment {i}/{len(commands)} ---")
         print(f"Command: {cmd}")
@@ -77,7 +77,7 @@ def compile_and_plot(out_dir_path: Path) -> None:
     history_df = pd.concat(history_dfs, ignore_index=True)
 
     config_cols = [
-        "attention_type", "positional_mode", "drop_positions_step",
+        "attention_type", "positional_mode", "drop_positions_tokens",
         "hidden_size", "n_layers", "head_size", "train_seq_len", "test_seq_len", "seed",
     ]
     present_cols = [c for c in config_cols if c in results_df.columns]
@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--skip_runs", action="store_true", help="Skip running experiments and only compile/plot.")
     parser.add_argument("--bugfix", action="store_true", help="Run a cheap bugfix sweep with checks.")
     parser.add_argument("--wandb_token", type=str, default=None, help="Weights & Biases API token. Enables wandb logging if provided.")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[11], help="Random seeds to pass to sweep runs.")
     args = parser.parse_args()
 
     if args.bugfix:
@@ -121,8 +122,8 @@ def main() -> None:
             f"{py_cmd} -m src.training.sweep_mlm "
             "--dataset protein "
             "--out_dir outputs_bugfix_exp2_protein "
-            "--steps 4 --warmup_steps 1 --cooldown_steps 1 --eval_every 2 "
-            "--batch_size 2 --eval_batches 1 "
+            "--total_tokens 128 --warmup_tokens 32 --cooldown_tokens 32 --eval_every 2 "
+            "--batch_size 2 "
             "--train_seq_len 16 --test_seq_len 32 "
             "--hidden_size 32 --n_layers 2 "
             "--seeds 11 "
@@ -134,7 +135,7 @@ def main() -> None:
         print(f"Bugfix command: {cmd}")
         subprocess.run(cmd, shell=True, check=True)
     elif not args.skip_runs:
-        run_experiments(wandb_token=args.wandb_token)
+        run_experiments(wandb_token=args.wandb_token, seeds=args.seeds)
     else:
         print("Skipping experiment execution as requested.")
 

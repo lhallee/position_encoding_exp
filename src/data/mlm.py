@@ -60,8 +60,9 @@ class StreamingTokenExamples(IterableDataset):
         else:
             self._eos_id = None
 
-    def _iter_once(self) -> Iterator[torch.Tensor]:
-        for sample in self.dataset:
+    def _iter_once(self, dataset: Iterable[dict] | None = None) -> Iterator[torch.Tensor]:
+        source = dataset if dataset is not None else self.dataset
+        for sample in source:
             text = _select_text(sample, self.cfg.text_key)
             ids: list[int] = self.tokenizer.encode(
                 text,
@@ -79,13 +80,51 @@ class StreamingTokenExamples(IterableDataset):
                 ids = ids + [self._pad_id] * pad_len
             yield torch.tensor(ids, dtype=torch.long)
 
+    def _shard_dataset(self, dataset: Iterable[dict]) -> Iterable[dict]:
+        """Shard dataset across DataLoader workers to avoid duplicate batches."""
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None or worker_info.num_workers <= 1:
+            return dataset
+        # HuggingFace streaming datasets support .shard() for efficient file-level splitting
+        if hasattr(dataset, 'shard'):
+            return dataset.shard(num_shards=worker_info.num_workers, index=worker_info.id)
+        # List-based datasets (eval): modulo sharding
+        return [d for i, d in enumerate(dataset) if i % worker_info.num_workers == worker_info.id]
+
     def __iter__(self) -> Iterator[torch.Tensor]:
+        dataset = self._shard_dataset(self.dataset)
         if self.cfg.repeat:
             while True:
-                for item in self._iter_once():
+                for item in self._iter_once(dataset):
                     yield item
         else:
-            yield from self._iter_once()
+            yield from self._iter_once(dataset)
+
+
+# ---------------------------------------------------------------------------
+# Eval-document filtering wrapper
+# ---------------------------------------------------------------------------
+
+class FilteredStream:
+    """Wraps a streaming dataset and skips documents whose text is in the eval set.
+
+    Preserves the .shard() interface so DataLoader worker sharding still works.
+    """
+
+    def __init__(self, base: Iterable[dict], eval_texts: frozenset[str], text_key: str) -> None:
+        assert isinstance(eval_texts, frozenset), f"eval_texts must be a frozenset, got {type(eval_texts)}"
+        self.base = base
+        self.eval_texts = eval_texts
+        self.text_key = text_key
+
+    def __iter__(self):
+        for sample in self.base:
+            text = _select_text(sample, self.text_key)
+            if text not in self.eval_texts:
+                yield sample
+
+    def shard(self, num_shards: int, index: int):
+        return FilteredStream(self.base.shard(num_shards, index), self.eval_texts, self.text_key)
 
 
 # ---------------------------------------------------------------------------
