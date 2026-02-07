@@ -16,11 +16,11 @@ from src.plotting.plot_argmax import plot_all
 
 
 COMMAND_ARGS = [
-    "--d_models 4 64 768 --n_layers 1 4 12 --conditions none --out_dir group_1",
+    #"--d_models 4 64 768 --n_layers 1 4 12 --conditions none --out_dir group_1",
     #"--d_models 4 64 768 --n_layers 1 4 12 --conditions learned_abs --out_dir group_2",
     #"--d_models 4 64 768 --n_layers 1 4 12 --conditions learned_abs_drop --out_dir group_3",
-    #"--d_models 4 64 768 --n_layers 1 4 12 --conditions rotary --out_dir group_4",
-    #"--d_models 4 64 768 --n_layers 1 4 12 --conditions rotary_drop --out_dir group_5",
+    "--d_models 4 64 768 --n_layers 1 4 12 --conditions rotary --out_dir group_4",
+    "--d_models 4 64 768 --n_layers 1 4 12 --conditions rotary_drop --out_dir group_5",
 ]
 
 
