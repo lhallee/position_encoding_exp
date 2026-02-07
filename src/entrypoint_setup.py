@@ -43,7 +43,7 @@ try:
     except Exception:
         print("Failed to import torch._dynamo")
 
-    torch._dynamo.config.recompile_limit = 32
+    torch._dynamo.config.recompile_limit = 64
 
 except ImportError:
     pass
